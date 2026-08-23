@@ -43,13 +43,21 @@ func cmdLog(args []string) error {
 		return nil
 	}
 
-	for {
-		p, err := r.store.Get(hash)
-		if err != nil {
-			return fmt.Errorf("reading patch %s: %w", hash, err)
-		}
+	entries, err := patches.History(r.store, hash)
+	if err != nil {
+		return fmt.Errorf("reading history: %w", err)
+	}
 
-		fmt.Printf("patch %s\n", hash)
+	for _, e := range entries {
+		p := e.Patch
+		fmt.Printf("patch %s\n", e.Hash)
+		if len(p.Dependencies) > 1 {
+			deps := make([]string, len(p.Dependencies))
+			for i, d := range p.Dependencies {
+				deps[i] = d.String()[:12]
+			}
+			fmt.Printf("Merge:  %v\n", deps)
+		}
 		fmt.Printf("Author: %s\n", p.Author)
 		fmt.Printf("Date:   %s\n", p.Time.Local().Format("Mon Jan 2 15:04:05 2006 -0700"))
 		fmt.Printf("\n    %s\n\n", p.Message)
@@ -62,9 +70,10 @@ func cmdLog(args []string) error {
 			default:
 				ins, del := 0, 0
 				for _, op := range fc.Ops {
-					if op.Kind == patches.OpInsert {
+					switch op.Kind {
+					case patches.OpInsert:
 						ins++
-					} else {
+					case patches.OpDelete:
 						del++
 					}
 				}
@@ -72,11 +81,6 @@ func cmdLog(args []string) error {
 			}
 		}
 		fmt.Println()
-
-		if p.Parent.IsZero() {
-			break
-		}
-		hash = p.Parent
 	}
 	return nil
 }

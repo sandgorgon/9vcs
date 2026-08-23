@@ -127,6 +127,39 @@ func (r *repo) setRefHash(name string, h patches.Hash) error {
 	return os.WriteFile(r.refPath(name), []byte(h.String()+"\n"), 0o644)
 }
 
+func (r *repo) mergeHeadFile() string { return filepath.Join(r.dir, "MERGE_HEAD") }
+
+// mergeHead reads the in-progress merge's other side, if any. Its presence
+// is what tells record to make the next patch depend on both branch tips
+// instead of just HEAD, and to finalize the merge rather than requiring
+// changes.
+func (r *repo) mergeHead() (patches.Hash, bool, error) {
+	data, err := os.ReadFile(r.mergeHeadFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return patches.Hash{}, false, nil
+	}
+	if err != nil {
+		return patches.Hash{}, false, err
+	}
+	h, err := patches.HashFromHex(strings.TrimSpace(string(data)))
+	if err != nil {
+		return patches.Hash{}, false, err
+	}
+	return h, true, nil
+}
+
+func (r *repo) setMergeHead(h patches.Hash) error {
+	return os.WriteFile(r.mergeHeadFile(), []byte(h.String()+"\n"), 0o644)
+}
+
+func (r *repo) clearMergeHead() error {
+	err := os.Remove(r.mergeHeadFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // listBranches returns every branch name with a ref file, sorted.
 func (r *repo) listBranches() ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(r.dir, "refs"))

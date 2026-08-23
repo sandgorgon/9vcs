@@ -77,8 +77,17 @@ func joinLines(lines []patches.Line, trailingNewline bool) string {
 }
 
 // changedFiles compares the working tree against base (a materialized
-// Index), returning the FileChange for every path that differs — added,
-// removed, or edited, text or binary — keyed by path.
+// Index — possibly a merge union, with forks), returning the FileChange
+// for every path that differs — added, removed, or edited, text or binary
+// — keyed by path.
+//
+// For a path whose base has unresolved forks, this is also where
+// conflict resolution actually happens: the working-tree content is
+// diffed against the fork's marker-stripped rendering (never the
+// marker-included one — see patches.StripMarkers), and Resolve's healing
+// ops are folded in automatically. Every caller — record, diff, and
+// checkout's dirty-tree check — gets this for free without needing to
+// know whether a merge is in progress.
 func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, error) {
 	paths, err := r.workingFiles()
 	if err != nil {
@@ -109,14 +118,20 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 			continue
 		}
 
-		trailing := hasTrailingNewline(content)
-		var priorLines []patches.Line
-		if prior.Kind == patches.KindText {
-			priorLines = prior.Lines
+		var baseLines []patches.Line
+		var forks []patches.Fork
+		if prior.Kind == patches.KindText && prior.Graph != nil {
+			baseLines, forks = patches.Linearize(prior.Graph)
 		}
-		ops, _ := patches.Diff(priorLines, splitLines(string(content)))
-		if existed && prior.Kind == patches.KindText && len(ops) == 0 && prior.TrailingNewline == trailing {
-			continue // unchanged
+		trailing := hasTrailingNewline(content)
+		ops, finalLines := patches.Diff(patches.StripMarkers(baseLines), splitLines(string(content)))
+		if len(forks) > 0 {
+			ops = append(ops, patches.Resolve(forks, finalLines)...)
+		}
+		unchanged := existed && prior.Kind == patches.KindText && len(forks) == 0 &&
+			len(ops) == 0 && prior.TrailingNewline == trailing
+		if unchanged {
+			continue
 		}
 		out[p] = patches.FileChange{Path: p, Kind: patches.KindText, Ops: ops, TrailingNewline: trailing}
 	}
@@ -131,7 +146,9 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 }
 
 // writeWorkingTree materializes new to disk, then removes any file present
-// in old but absent from new (i.e. deleted between the two points).
+// in old but absent from new (i.e. deleted between the two points). A
+// KindText path with unresolved forks is written with inline conflict
+// markers — the presented rendering, not a resolved one.
 func writeWorkingTree(r *repo, old, new patches.Index) error {
 	for p, st := range new {
 		full := filepath.Join(r.root, filepath.FromSlash(p))
@@ -139,14 +156,16 @@ func writeWorkingTree(r *repo, old, new patches.Index) error {
 			return err
 		}
 		var content []byte
-		if st.Kind == patches.KindBlob {
+		switch st.Kind {
+		case patches.KindBlob:
 			data, err := r.blobs.Get(st.Blob)
 			if err != nil {
 				return fmt.Errorf("reading blob for %s: %w", p, err)
 			}
 			content = data
-		} else {
-			content = []byte(joinLines(st.Lines, st.TrailingNewline))
+		default:
+			lines, _ := patches.Linearize(st.Graph)
+			content = []byte(joinLines(lines, st.TrailingNewline))
 		}
 		if err := os.WriteFile(full, content, 0o644); err != nil {
 			return err

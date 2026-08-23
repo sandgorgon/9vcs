@@ -92,15 +92,13 @@ func diffRefs(r *repo, a, b string) error {
 			}
 			renderDiff(p, stA, patches.FileChange{Path: p, Kind: patches.KindBlob, Blob: stB.Blob})
 		default: // stB is text
-			var oldLines []patches.Line
-			if stA.Kind == patches.KindText {
-				oldLines = stA.Lines
-			}
-			newContent := make([]string, len(stB.Lines))
-			for i, l := range stB.Lines {
+			baseLinesA := linesOf(stA)
+			newLinesB := linesOf(stB)
+			newContent := make([]string, len(newLinesB))
+			for i, l := range newLinesB {
 				newContent[i] = l.Content
 			}
-			ops, _ := patches.Diff(oldLines, newContent)
+			ops, _ := patches.Diff(baseLinesA, newContent)
 			if len(ops) == 0 && inA && stA.Kind == patches.KindText && stA.TrailingNewline == stB.TrailingNewline {
 				continue // unchanged
 			}
@@ -110,23 +108,37 @@ func diffRefs(r *repo, a, b string) error {
 	return nil
 }
 
+// linesOf renders a text PathState's current content, ignoring any
+// unresolved forks (diff is read-only display; a real fork only ever
+// shows up here for an in-progress merge's own patch, which diff doesn't
+// need to render specially — record's conflict-marker working-tree file is
+// what the user actually edits).
+func linesOf(st patches.PathState) []patches.Line {
+	if st.Kind != patches.KindText || st.Graph == nil {
+		return nil
+	}
+	lines, _ := patches.Linearize(st.Graph)
+	return lines
+}
+
 // renderDiff prints a diff for one path's change. Text changes get a
 // simple +/- line diff (not grouped into unified-diff hunks with
 // surrounding context — a scaffold-quality rendering, not a full diff
 // formatter). Binary changes get git's own "Binary files ... differ"
 // treatment, since a line diff is meaningless for them.
 func renderDiff(path string, base patches.PathState, change patches.FileChange) {
+	baseLines := linesOf(base)
 	switch change.Kind {
 	case patches.KindDelete:
 		if base.Kind == patches.KindBlob {
 			fmt.Printf("deleted binary file %s\n", path)
 			return
 		}
-		if len(base.Lines) == 0 {
+		if len(baseLines) == 0 {
 			return
 		}
 		fmt.Printf("--- %s\n+++ /dev/null\n", path)
-		for _, l := range base.Lines {
+		for _, l := range baseLines {
 			fmt.Printf("-%s\n", l.Content)
 		}
 	case patches.KindBlob:
@@ -135,8 +147,8 @@ func renderDiff(path string, base patches.PathState, change patches.FileChange) 
 		if len(change.Ops) == 0 {
 			return
 		}
-		baseContent := make(map[string]string, len(base.Lines))
-		for _, l := range base.Lines {
+		baseContent := make(map[string]string, len(baseLines))
+		for _, l := range baseLines {
 			baseContent[l.ID] = l.Content
 		}
 		fmt.Printf("--- %s\n+++ %s\n", path, path)

@@ -25,16 +25,33 @@ func newLineID() string {
 }
 
 // Diff computes the ops that transform old (the last-recorded line graph
-// for a file) into new (its current raw text content, split into lines),
-// along with the resulting line graph after those ops are applied.
+// for a file, in order) into new (its current raw text content, split into
+// lines), along with the resulting line list after those ops are applied.
 //
 // This is a plain LCS alignment on line content, not Pijul's full
 // categorical patch construction — a deliberately simplified starting point
-// (see PLAN.md "Open items to revisit").
+// (see PLAN.md "Open items to revisit"). Each op's Prev/Next name old's
+// immediate neighbors at that point, which is what lets graph.go replay it
+// as a real edge operation rather than a flat-list splice.
 func Diff(old []Line, new []string) (ops []LineOp, newIndex []Line) {
 	oldContent := make([]string, len(old))
 	for i, l := range old {
 		oldContent[i] = l.Content
+	}
+
+	// nextID(i) is the id immediately after position i in old ("" at EOF) —
+	// exactly what Prev/Next need, independent of what else is deleted.
+	nextID := func(i int) string {
+		if i < len(old) {
+			return old[i].ID
+		}
+		return ""
+	}
+	prevOldID := func(i int) string {
+		if i > 0 {
+			return old[i-1].ID
+		}
+		return ""
 	}
 
 	common := lcs(oldContent, new)
@@ -46,13 +63,13 @@ func Diff(old []Line, new []string) (ops []LineOp, newIndex []Line) {
 	for ci < len(common) {
 		// Delete old lines that don't survive to the next common line.
 		for oi < len(old) && old[oi].Content != common[ci] {
-			ops = append(ops, LineOp{Kind: OpDelete, ID: old[oi].ID})
+			ops = append(ops, LineOp{Kind: OpDelete, ID: old[oi].ID, Prev: prevOldID(oi), Next: nextID(oi + 1)})
 			oi++
 		}
 		// Insert new lines that appear before the next common line.
 		for ni < len(new) && new[ni] != common[ci] {
 			id := newLineID()
-			ops = append(ops, LineOp{Kind: OpInsert, ID: id, After: prevID, Content: new[ni]})
+			ops = append(ops, LineOp{Kind: OpInsert, ID: id, Prev: prevID, Next: nextID(oi), Content: new[ni]})
 			newIndex = append(newIndex, Line{ID: id, Content: new[ni]})
 			prevID = id
 			ni++
@@ -65,12 +82,12 @@ func Diff(old []Line, new []string) (ops []LineOp, newIndex []Line) {
 		ci++
 	}
 	for oi < len(old) {
-		ops = append(ops, LineOp{Kind: OpDelete, ID: old[oi].ID})
+		ops = append(ops, LineOp{Kind: OpDelete, ID: old[oi].ID, Prev: prevOldID(oi), Next: nextID(oi + 1)})
 		oi++
 	}
 	for ni < len(new) {
 		id := newLineID()
-		ops = append(ops, LineOp{Kind: OpInsert, ID: id, After: prevID, Content: new[ni]})
+		ops = append(ops, LineOp{Kind: OpInsert, ID: id, Prev: prevID, Next: nextID(oi), Content: new[ni]})
 		newIndex = append(newIndex, Line{ID: id, Content: new[ni]})
 		prevID = id
 		ni++

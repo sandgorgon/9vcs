@@ -28,6 +28,8 @@ func main() {
 		err = cmdCheckout(os.Args[2:])
 	case "diff":
 		err = cmdDiff(os.Args[2:])
+	case "merge":
+		err = cmdMerge(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -52,5 +54,6 @@ commands:
   branch [<name> [<start>]]   list branches, or create one
   checkout [-b] <name-or-hash> switch the working tree to a branch or patch
   diff [<ref>] [<ref>]        show uncommitted changes, or the difference between two points
+  merge <name-or-hash>        merge a branch or patch into the current branch
 `)
 }

@@ -35,7 +35,17 @@ func cmdRecord(args []string) error {
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
-	base, err := patches.Materialize(r.store, head)
+	mergeHead, midMerge, err := r.mergeHead()
+	if err != nil {
+		return fmt.Errorf("reading merge state: %w", err)
+	}
+
+	var base patches.Index
+	if midMerge {
+		base, err = patches.Materialize(r.store, head, mergeHead)
+	} else {
+		base, err = patches.Materialize(r.store, head)
+	}
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
 	}
@@ -44,12 +54,30 @@ func cmdRecord(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(changes) == 0 {
+	if len(changes) == 0 && !midMerge {
 		fmt.Println("nothing to record")
 		return nil
 	}
+	for _, fc := range changes {
+		if fc.Kind != patches.KindText {
+			continue
+		}
+		for _, op := range fc.Ops {
+			if op.Kind == patches.OpInsert && patches.IsMarker(op.Content) {
+				return fmt.Errorf("%s: still has unresolved conflict markers; resolve them before recording", fc.Path)
+			}
+		}
+	}
 
-	patch := &patches.Patch{Parent: head, Author: author(), Time: time.Now(), Message: *message}
+	var deps []patches.Hash
+	if !head.IsZero() {
+		deps = append(deps, head)
+	}
+	if midMerge && !mergeHead.IsZero() {
+		deps = append(deps, mergeHead)
+	}
+
+	patch := &patches.Patch{Dependencies: deps, Author: author(), Time: time.Now(), Message: *message}
 	for _, fc := range changes {
 		patch.Changes = append(patch.Changes, fc)
 	}
@@ -60,6 +88,11 @@ func cmdRecord(args []string) error {
 	}
 	if err := r.setRefHash(branch, hash); err != nil {
 		return fmt.Errorf("updating ref: %w", err)
+	}
+	if midMerge {
+		if err := r.clearMergeHead(); err != nil {
+			return fmt.Errorf("clearing merge state: %w", err)
+		}
 	}
 
 	fmt.Printf("recorded %s: %s\n", hash.String()[:12], *message)

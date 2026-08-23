@@ -19,7 +19,7 @@ func Open(dir string) (*Store, error) {
 // Put encodes and hashes p, writing it to the store if not already present.
 // Content addressing makes this naturally idempotent.
 func (s *Store) Put(p *Patch) (Hash, error) {
-	p.SortChanges()
+	p.Normalize()
 	return s.raw.put(p.Encode())
 }
 

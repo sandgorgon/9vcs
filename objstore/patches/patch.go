@@ -38,17 +38,41 @@ type OpKind uint8
 const (
 	OpInsert OpKind = iota
 	OpDelete
+	// OpSever explicitly kills the edge Prev->Next, with no other effect —
+	// ID/Content unused. Used only by merge-conflict resolution (see
+	// linearize.go's Resolve) to retract a fork alternative's now-stale
+	// edge once the resolved content no longer puts it there; ordinary
+	// edits never need it, since Insert/Delete already sever whatever
+	// edge they split or reconnect around.
+	OpSever
+	// OpLink explicitly adds the edge Prev->Next, with no other effect —
+	// ID/Content unused, and both nodes must already exist. Used only by
+	// merge-conflict resolution, to connect two surviving, content-wise
+	// *unedited* fork alternatives that are now adjacent — Diff alone
+	// can't discover this, since neither line's content changed, so it
+	// emits no op that would otherwise create the edge between them.
+	OpLink
 )
 
-// LineOp is a single graph operation on one file's line graph.
+// LineOp is a single graph operation on one file's line graph, expressed
+// relative to the two neighbors it had in whatever base state this op was
+// computed against.
 //
-// Insert: ID is the new line's stable id, After is the id of the line it is
-// inserted immediately after ("" = start of file), Content is its text.
-// Delete: ID is the id of the line being removed; After/Content are unused.
+// Insert: ID is the new line's stable id, Content is its text, Prev/Next
+// are the ids immediately before/after it ("" = start/end of file). The op
+// both adds edges Prev->ID and ID->Next, and severs the direct Prev->Next
+// edge it's splitting.
+//
+// Delete: ID is the id of the line being removed, and Prev/Next are its
+// same two neighbors — severing Prev->ID and ID->Next, and adding a new
+// Prev->Next edge that reconnects around the gap. This reconnect is what
+// lets a concurrent, unrelated edit downstream commute cleanly instead of
+// silently forking; see graph.go.
 type LineOp struct {
 	Kind    OpKind
 	ID      string
-	After   string
+	Prev    string
+	Next    string
 	Content string
 }
 
@@ -84,14 +108,17 @@ type FileChange struct {
 }
 
 // Patch is one immutable, content-addressed unit of history: a set of
-// per-file graph operations plus the hash of the patch it was recorded on
-// top of.
+// per-file graph operations, plus the patches whose effects those ops
+// assume are already applied. A root patch has no dependencies. A merge
+// patch depends on more than one prior patch — this (not a special "merge"
+// flag) is what lets two branches' histories combine: repo state is
+// whatever's reachable by following Dependencies, not a single chain.
 type Patch struct {
-	Parent  Hash // zero for the first patch in a history
-	Author  string
-	Time    time.Time
-	Message string
-	Changes []FileChange
+	Dependencies []Hash
+	Author       string
+	Time         time.Time
+	Message      string
+	Changes      []FileChange
 }
 
 // Encode produces a canonical, deterministic byte representation of p,
@@ -100,7 +127,10 @@ type Patch struct {
 // the differ).
 func (p *Patch) Encode() []byte {
 	var buf bytes.Buffer
-	buf.Write(p.Parent[:])
+	writeInt64(&buf, int64(len(p.Dependencies)))
+	for _, d := range p.Dependencies {
+		buf.Write(d[:])
+	}
 	writeString(&buf, p.Author)
 	writeInt64(&buf, p.Time.UTC().UnixNano())
 	writeString(&buf, p.Message)
@@ -114,7 +144,8 @@ func (p *Patch) Encode() []byte {
 		for _, op := range fc.Ops {
 			buf.WriteByte(byte(op.Kind))
 			writeString(&buf, op.ID)
-			writeString(&buf, op.After)
+			writeString(&buf, op.Prev)
+			writeString(&buf, op.Next)
 			writeString(&buf, op.Content)
 		}
 	}
@@ -126,9 +157,14 @@ func (p *Patch) Hash() Hash {
 	return blake3.Sum256(p.Encode())
 }
 
-// SortChanges puts Changes into the canonical path order Encode/Hash expect.
-func (p *Patch) SortChanges() {
+// Normalize puts Changes and Dependencies into the canonical order
+// Encode/Hash expect, so semantically-identical patches always hash the
+// same regardless of the order callers built them in.
+func (p *Patch) Normalize() {
 	sort.Slice(p.Changes, func(i, j int) bool { return p.Changes[i].Path < p.Changes[j].Path })
+	sort.Slice(p.Dependencies, func(i, j int) bool {
+		return bytes.Compare(p.Dependencies[i][:], p.Dependencies[j][:]) < 0
+	})
 }
 
 // Decode parses the canonical encoding produced by Encode. The encoding is
@@ -137,8 +173,15 @@ func (p *Patch) SortChanges() {
 func Decode(data []byte) (*Patch, error) {
 	r := bytes.NewReader(data)
 	p := &Patch{}
-	if _, err := io.ReadFull(r, p.Parent[:]); err != nil {
-		return nil, fmt.Errorf("patch: decode parent: %w", err)
+	nDeps, err := readInt64(r)
+	if err != nil {
+		return nil, fmt.Errorf("patch: decode dependency count: %w", err)
+	}
+	p.Dependencies = make([]Hash, nDeps)
+	for i := range p.Dependencies {
+		if _, err := io.ReadFull(r, p.Dependencies[i][:]); err != nil {
+			return nil, fmt.Errorf("patch: decode dependency %d: %w", i, err)
+		}
 	}
 	author, err := readString(r)
 	if err != nil {
@@ -191,15 +234,19 @@ func Decode(data []byte) (*Patch, error) {
 			if err != nil {
 				return nil, fmt.Errorf("patch: decode change %d op %d id: %w", i, j, err)
 			}
-			after, err := readString(r)
+			prev, err := readString(r)
 			if err != nil {
-				return nil, fmt.Errorf("patch: decode change %d op %d after: %w", i, j, err)
+				return nil, fmt.Errorf("patch: decode change %d op %d prev: %w", i, j, err)
+			}
+			next, err := readString(r)
+			if err != nil {
+				return nil, fmt.Errorf("patch: decode change %d op %d next: %w", i, j, err)
 			}
 			content, err := readString(r)
 			if err != nil {
 				return nil, fmt.Errorf("patch: decode change %d op %d content: %w", i, j, err)
 			}
-			ops = append(ops, LineOp{Kind: OpKind(kindByte), ID: id, After: after, Content: content})
+			ops = append(ops, LineOp{Kind: OpKind(kindByte), ID: id, Prev: prev, Next: next, Content: content})
 		}
 		p.Changes = append(p.Changes, FileChange{
 			Path:            path,
