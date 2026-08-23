@@ -26,6 +26,15 @@ func cmdInit(args []string) error {
 	if _, err := patches.Open(filepath.Join(dir, "patches")); err != nil {
 		return err
 	}
+
+	r, err := openRepo(cwd)
+	if err != nil {
+		return err
+	}
+	if err := r.setHeadBranch(defaultBranch); err != nil {
+		return err
+	}
+
 	fmt.Printf("initialized empty 9vcs repository in %s\n", dir)
 	return nil
 }

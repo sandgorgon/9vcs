@@ -12,15 +12,31 @@ func cmdLog(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	rest := fs.Args()
+	if len(rest) > 1 {
+		return fmt.Errorf("log: too many arguments (expected [<ref>])")
+	}
 
 	r, err := findRepo()
 	if err != nil {
 		return err
 	}
 
-	hash, ok, err := r.headHash()
-	if err != nil {
-		return fmt.Errorf("reading head: %w", err)
+	var (
+		hash patches.Hash
+		ok   bool
+	)
+	if len(rest) == 1 {
+		hash, err = r.resolveRef(rest[0])
+		if err != nil {
+			return fmt.Errorf("log: %w", err)
+		}
+		ok = true
+	} else {
+		hash, ok, err = r.headHash()
+		if err != nil {
+			return fmt.Errorf("reading head: %w", err)
+		}
 	}
 	if !ok {
 		fmt.Println("no patches recorded yet")

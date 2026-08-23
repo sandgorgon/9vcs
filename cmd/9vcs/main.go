@@ -22,6 +22,12 @@ func main() {
 		err = cmdRecord(os.Args[2:])
 	case "log":
 		err = cmdLog(os.Args[2:])
+	case "branch":
+		err = cmdBranch(os.Args[2:])
+	case "checkout":
+		err = cmdCheckout(os.Args[2:])
+	case "diff":
+		err = cmdDiff(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -40,8 +46,11 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: 9vcs <command> [arguments]
 
 commands:
-  init            initialize a repository in the current directory
-  record -m MSG   record a patch from the current working tree changes
-  log             show recorded patches, most recent first
+  init                        initialize a repository in the current directory
+  record -m MSG               record a patch from the current working tree changes
+  log [<ref>]                 show recorded patches, most recent first
+  branch [<name> [<start>]]   list branches, or create one
+  checkout [-b] <name-or-hash> switch the working tree to a branch or patch
+  diff [<ref>] [<ref>]        show uncommitted changes, or the difference between two points
 `)
 }
