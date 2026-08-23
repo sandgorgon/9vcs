@@ -70,36 +70,36 @@ func TestMaterializeChain(t *testing.T) {
 
 	idx := Index{}
 
-	ops1, newIdx1 := Diff(idx["f.txt"], []string{"one", "two"})
-	p1 := &Patch{Message: "first", Changes: []FileChange{{Path: "f.txt", Ops: ops1}}}
+	ops1, newLines1 := Diff(idx["f.txt"].Lines, []string{"one", "two"})
+	p1 := &Patch{Message: "first", Changes: []FileChange{{Path: "f.txt", Kind: KindText, Ops: ops1, TrailingNewline: true}}}
 	h1, err := store.Put(p1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx["f.txt"] = newIdx1
+	idx["f.txt"] = PathState{Kind: KindText, Lines: newLines1, TrailingNewline: true}
 
-	ops2, newIdx2 := Diff(idx["f.txt"], []string{"one", "TWO", "three"})
-	p2 := &Patch{Parent: h1, Message: "second", Changes: []FileChange{{Path: "f.txt", Ops: ops2}}}
+	ops2, newLines2 := Diff(idx["f.txt"].Lines, []string{"one", "TWO", "three"})
+	p2 := &Patch{Parent: h1, Message: "second", Changes: []FileChange{{Path: "f.txt", Kind: KindText, Ops: ops2, TrailingNewline: true}}}
 	h2, err := store.Put(p2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx["f.txt"] = newIdx2
+	idx["f.txt"] = PathState{Kind: KindText, Lines: newLines2, TrailingNewline: true}
 
 	got2, err := Materialize(store, h2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"one", "TWO", "three"}; !sameStrings(contents(got2["f.txt"]), want) {
-		t.Fatalf("Materialize(h2) = %v, want %v", contents(got2["f.txt"]), want)
+	if want := []string{"one", "TWO", "three"}; !sameStrings(contents(got2["f.txt"].Lines), want) {
+		t.Fatalf("Materialize(h2) = %v, want %v", contents(got2["f.txt"].Lines), want)
 	}
 
 	got1, err := Materialize(store, h1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"one", "two"}; !sameStrings(contents(got1["f.txt"]), want) {
-		t.Fatalf("Materialize(h1) = %v, want %v", contents(got1["f.txt"]), want)
+	if want := []string{"one", "two"}; !sameStrings(contents(got1["f.txt"].Lines), want) {
+		t.Fatalf("Materialize(h1) = %v, want %v", contents(got1["f.txt"].Lines), want)
 	}
 
 	gotZero, err := Materialize(store, Hash{})

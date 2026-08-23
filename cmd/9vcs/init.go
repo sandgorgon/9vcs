@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
 func cmdInit(args []string) error {
@@ -21,9 +19,6 @@ func cmdInit(args []string) error {
 		return fmt.Errorf("%s already exists", dir)
 	}
 	if err := os.MkdirAll(filepath.Join(dir, "refs"), 0o755); err != nil {
-		return err
-	}
-	if _, err := patches.Open(filepath.Join(dir, "patches")); err != nil {
 		return err
 	}
 

@@ -42,12 +42,12 @@ func diffWorkingTree(r *repo, base patches.Hash) error {
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
 	}
-	ops, err := changedFiles(r, idx)
+	changes, err := changedFiles(r, idx)
 	if err != nil {
 		return err
 	}
-	for _, p := range sortedKeys(ops) {
-		renderDiff(p, idx[p], ops[p])
+	for _, p := range sortedPaths(changes) {
+		renderDiff(p, idx[p], changes[p])
 	}
 	return nil
 }
@@ -80,34 +80,73 @@ func diffRefs(r *repo, a, b string) error {
 		paths[p] = true
 	}
 	for p := range paths {
-		newContent := make([]string, len(idxB[p]))
-		for i, l := range idxB[p] {
-			newContent[i] = l.Content
+		stA, inA := idxA[p]
+		stB, inB := idxB[p]
+
+		switch {
+		case !inB:
+			renderDiff(p, stA, patches.FileChange{Path: p, Kind: patches.KindDelete})
+		case stB.Kind == patches.KindBlob:
+			if inA && stA.Kind == patches.KindBlob && stA.Blob == stB.Blob {
+				continue // unchanged
+			}
+			renderDiff(p, stA, patches.FileChange{Path: p, Kind: patches.KindBlob, Blob: stB.Blob})
+		default: // stB is text
+			var oldLines []patches.Line
+			if stA.Kind == patches.KindText {
+				oldLines = stA.Lines
+			}
+			newContent := make([]string, len(stB.Lines))
+			for i, l := range stB.Lines {
+				newContent[i] = l.Content
+			}
+			ops, _ := patches.Diff(oldLines, newContent)
+			if len(ops) == 0 && inA && stA.Kind == patches.KindText && stA.TrailingNewline == stB.TrailingNewline {
+				continue // unchanged
+			}
+			renderDiff(p, stA, patches.FileChange{Path: p, Kind: patches.KindText, Ops: ops, TrailingNewline: stB.TrailingNewline})
 		}
-		ops, _ := patches.Diff(idxA[p], newContent)
-		renderDiff(p, idxA[p], ops)
 	}
 	return nil
 }
 
-// renderDiff prints a simple +/- line diff for one path. It isn't grouped
-// into unified-diff hunks with surrounding context — a scaffold-quality
-// rendering, not a full diff formatter.
-func renderDiff(path string, base []patches.Line, ops []patches.LineOp) {
-	if len(ops) == 0 {
-		return
-	}
-	baseContent := make(map[string]string, len(base))
-	for _, l := range base {
-		baseContent[l.ID] = l.Content
-	}
-	fmt.Printf("--- %s\n+++ %s\n", path, path)
-	for _, op := range ops {
-		switch op.Kind {
-		case patches.OpDelete:
-			fmt.Printf("-%s\n", baseContent[op.ID])
-		case patches.OpInsert:
-			fmt.Printf("+%s\n", op.Content)
+// renderDiff prints a diff for one path's change. Text changes get a
+// simple +/- line diff (not grouped into unified-diff hunks with
+// surrounding context — a scaffold-quality rendering, not a full diff
+// formatter). Binary changes get git's own "Binary files ... differ"
+// treatment, since a line diff is meaningless for them.
+func renderDiff(path string, base patches.PathState, change patches.FileChange) {
+	switch change.Kind {
+	case patches.KindDelete:
+		if base.Kind == patches.KindBlob {
+			fmt.Printf("deleted binary file %s\n", path)
+			return
+		}
+		if len(base.Lines) == 0 {
+			return
+		}
+		fmt.Printf("--- %s\n+++ /dev/null\n", path)
+		for _, l := range base.Lines {
+			fmt.Printf("-%s\n", l.Content)
+		}
+	case patches.KindBlob:
+		fmt.Printf("Binary files %s and %s differ\n", path, path)
+	default: // KindText
+		if len(change.Ops) == 0 {
+			return
+		}
+		baseContent := make(map[string]string, len(base.Lines))
+		for _, l := range base.Lines {
+			baseContent[l.ID] = l.Content
+		}
+		fmt.Printf("--- %s\n+++ %s\n", path, path)
+		for _, op := range change.Ops {
+			switch op.Kind {
+			case patches.OpDelete:
+				fmt.Printf("-%s\n", baseContent[op.ID])
+			case patches.OpInsert:
+				fmt.Printf("+%s\n", op.Content)
+			}
 		}
 	}
 }

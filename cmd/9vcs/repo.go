@@ -21,6 +21,7 @@ type repo struct {
 	root  string // working tree root (parent of .9vcs)
 	dir   string // .9vcs
 	store *patches.Store
+	blobs *patches.BlobStore
 }
 
 var errNotARepo = errors.New("not a 9vcs repository (or any parent directory)")
@@ -52,7 +53,11 @@ func openRepo(root string) (*repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &repo{root: root, dir: dir, store: store}, nil
+	blobs, err := patches.OpenBlobs(filepath.Join(dir, "blobs"))
+	if err != nil {
+		return nil, err
+	}
+	return &repo{root: root, dir: dir, store: store, blobs: blobs}, nil
 }
 
 func (r *repo) headFile() string { return filepath.Join(r.dir, "HEAD") }

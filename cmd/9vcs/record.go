@@ -50,8 +50,8 @@ func cmdRecord(args []string) error {
 	}
 
 	patch := &patches.Patch{Parent: head, Author: author(), Time: time.Now(), Message: *message}
-	for p, ops := range changes {
-		patch.Changes = append(patch.Changes, patches.FileChange{Path: p, Ops: ops})
+	for _, fc := range changes {
+		patch.Changes = append(patch.Changes, fc)
 	}
 
 	hash, err := r.store.Put(patch)

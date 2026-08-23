@@ -54,15 +54,22 @@ func cmdLog(args []string) error {
 		fmt.Printf("Date:   %s\n", p.Time.Local().Format("Mon Jan 2 15:04:05 2006 -0700"))
 		fmt.Printf("\n    %s\n\n", p.Message)
 		for _, fc := range p.Changes {
-			ins, del := 0, 0
-			for _, op := range fc.Ops {
-				if op.Kind == patches.OpInsert {
-					ins++
-				} else {
-					del++
+			switch fc.Kind {
+			case patches.KindDelete:
+				fmt.Printf("    %s (deleted)\n", fc.Path)
+			case patches.KindBlob:
+				fmt.Printf("    %s (binary)\n", fc.Path)
+			default:
+				ins, del := 0, 0
+				for _, op := range fc.Ops {
+					if op.Kind == patches.OpInsert {
+						ins++
+					} else {
+						del++
+					}
 				}
+				fmt.Printf("    %s (+%d -%d)\n", fc.Path, ins, del)
 			}
-			fmt.Printf("    %s (+%d -%d)\n", fc.Path, ins, del)
 		}
 		fmt.Println()
 

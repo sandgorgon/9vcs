@@ -52,10 +52,35 @@ type LineOp struct {
 	Content string
 }
 
-// FileChange is the set of line ops touching one path in a single patch.
+// ChangeKind selects which fields of a FileChange are meaningful. A path's
+// history can switch kind over time (e.g. a text file overwritten with a
+// binary one) — each FileChange simply replaces whatever the path was
+// before with whatever kind it declares.
+type ChangeKind uint8
+
+const (
+	// KindText: Ops (and TrailingNewline) describe a line-graph edit,
+	// replayed against whatever line graph the path had before.
+	KindText ChangeKind = iota
+	// KindBlob: the path becomes the whole-file content addressed by Blob.
+	// Used for content line-diffing doesn't make sense for — binary
+	// formats — see PLAN.md "Open items: how the line-graph maps to
+	// non-text files". No delta/commute benefit for these paths, same
+	// tradeoff Git makes for binary blobs.
+	KindBlob
+	// KindDelete: the path is removed. Ops/TrailingNewline/Blob are unused.
+	KindDelete
+)
+
+// FileChange is the change to one path recorded by a single patch.
 type FileChange struct {
 	Path string
-	Ops  []LineOp
+	Kind ChangeKind
+
+	Ops             []LineOp // KindText only
+	TrailingNewline bool     // KindText only: did the recorded content end in '\n'?
+
+	Blob Hash // KindBlob only: hash of the whole file in the blob store
 }
 
 // Patch is one immutable, content-addressed unit of history: a set of
@@ -82,6 +107,9 @@ func (p *Patch) Encode() []byte {
 	writeInt64(&buf, int64(len(p.Changes)))
 	for _, fc := range p.Changes {
 		writeString(&buf, fc.Path)
+		buf.WriteByte(byte(fc.Kind))
+		writeBool(&buf, fc.TrailingNewline)
+		buf.Write(fc.Blob[:])
 		writeInt64(&buf, int64(len(fc.Ops)))
 		for _, op := range fc.Ops {
 			buf.WriteByte(byte(op.Kind))
@@ -137,6 +165,18 @@ func Decode(data []byte) (*Patch, error) {
 		if err != nil {
 			return nil, fmt.Errorf("patch: decode change %d path: %w", i, err)
 		}
+		kindByte, err := r.ReadByte()
+		if err != nil {
+			return nil, fmt.Errorf("patch: decode change %d kind: %w", i, err)
+		}
+		trailingNewline, err := readBool(r)
+		if err != nil {
+			return nil, fmt.Errorf("patch: decode change %d trailing newline: %w", i, err)
+		}
+		var blob Hash
+		if _, err := io.ReadFull(r, blob[:]); err != nil {
+			return nil, fmt.Errorf("patch: decode change %d blob: %w", i, err)
+		}
 		nOps, err := readInt64(r)
 		if err != nil {
 			return nil, fmt.Errorf("patch: decode change %d op count: %w", i, err)
@@ -161,7 +201,13 @@ func Decode(data []byte) (*Patch, error) {
 			}
 			ops = append(ops, LineOp{Kind: OpKind(kindByte), ID: id, After: after, Content: content})
 		}
-		p.Changes = append(p.Changes, FileChange{Path: path, Ops: ops})
+		p.Changes = append(p.Changes, FileChange{
+			Path:            path,
+			Kind:            ChangeKind(kindByte),
+			TrailingNewline: trailingNewline,
+			Blob:            blob,
+			Ops:             ops,
+		})
 	}
 	return p, nil
 }
@@ -176,6 +222,19 @@ func readString(r *bytes.Reader) (string, error) {
 		return "", err
 	}
 	return string(buf), nil
+}
+
+func readBool(r *bytes.Reader) (bool, error) {
+	b, err := r.ReadByte()
+	return b != 0, err
+}
+
+func writeBool(buf *bytes.Buffer, v bool) {
+	if v {
+		buf.WriteByte(1)
+	} else {
+		buf.WriteByte(0)
+	}
 }
 
 func readInt64(r *bytes.Reader) (int64, error) {
