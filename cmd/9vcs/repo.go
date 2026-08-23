@@ -160,6 +160,50 @@ func (r *repo) clearMergeHead() error {
 	return err
 }
 
+func (r *repo) mergeSidecarsFile() string { return filepath.Join(r.dir, "MERGE_SIDECARS") }
+
+// binaryConflictSidecar is the path merge writes theirs' content to,
+// alongside a binary conflict — e.g. "logo.png.theirs" next to
+// "logo.png", which keeps ours. It's a comparison aid, not tracked
+// content: record deletes it once the merge is finalized (see
+// mergeSidecars/setMergeSidecars).
+func binaryConflictSidecar(path string) string { return path + ".theirs" }
+
+// setMergeSidecars records every sidecar path merge wrote, so record knows
+// what to clean up once it finalizes — these are merge tooling, not
+// content the user asked to track.
+func (r *repo) setMergeSidecars(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	return os.WriteFile(r.mergeSidecarsFile(), []byte(strings.Join(paths, "\n")+"\n"), 0o644)
+}
+
+func (r *repo) mergeSidecars() ([]string, error) {
+	data, err := os.ReadFile(r.mergeSidecarsFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out, nil
+}
+
+func (r *repo) clearMergeSidecars() error {
+	err := os.Remove(r.mergeSidecarsFile())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
 // listBranches returns every branch name with a ref file, sorted.
 func (r *repo) listBranches() ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(r.dir, "refs"))

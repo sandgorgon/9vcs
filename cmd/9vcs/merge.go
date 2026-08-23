@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
@@ -98,8 +100,13 @@ func cmdMerge(args []string) error {
 
 	// Binary paths have no line-graph fork mechanism to detect divergence
 	// automatically — check directly, and fall back to keeping our own
-	// content, same tradeoff git makes for binary conflicts.
+	// content in place, same tradeoff git makes for binary conflicts.
+	// Theirs' content is written alongside as a comparison sidecar (e.g.
+	// "logo.png.theirs" next to "logo.png") so there's actually something
+	// to look at while deciding — record deletes it once the merge is
+	// finalized, it's not tracked content.
 	var conflicts []string
+	var sidecars []string
 	for p, ourSt := range oursIdx {
 		if ourSt.Kind != patches.KindBlob {
 			continue
@@ -109,7 +116,21 @@ func cmdMerge(args []string) error {
 			continue
 		}
 		conflicts = append(conflicts, p)
-		merged[p] = ourSt // keep ours in the working tree; user resolves by hand
+		merged[p] = ourSt
+
+		data, err := r.blobs.Get(theirSt.Blob)
+		if err != nil {
+			return fmt.Errorf("reading blob for %s: %w", p, err)
+		}
+		sidecar := binaryConflictSidecar(p)
+		full := filepath.Join(r.root, filepath.FromSlash(sidecar))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(full, data, 0o644); err != nil {
+			return fmt.Errorf("writing %s: %w", sidecar, err)
+		}
+		sidecars = append(sidecars, sidecar)
 	}
 	for p, st := range merged {
 		if st.Kind != patches.KindText || st.Graph == nil {
@@ -126,6 +147,9 @@ func cmdMerge(args []string) error {
 	if err := r.setMergeHead(theirs); err != nil {
 		return fmt.Errorf("recording merge state: %w", err)
 	}
+	if err := r.setMergeSidecars(sidecars); err != nil {
+		return fmt.Errorf("recording merge state: %w", err)
+	}
 
 	if len(conflicts) == 0 {
 		fmt.Println("merged cleanly; run `9vcs record` to finish")
@@ -134,6 +158,10 @@ func cmdMerge(args []string) error {
 	sort.Strings(conflicts)
 	fmt.Println("automatic merge failed; fix conflicts, then run `9vcs record` to finish:")
 	for _, p := range conflicts {
+		if st, ok := oursIdx[p]; ok && st.Kind == patches.KindBlob {
+			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", p, binaryConflictSidecar(p))
+			continue
+		}
 		fmt.Printf("  CONFLICT: %s\n", p)
 	}
 	return nil

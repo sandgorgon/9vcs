@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
@@ -38,6 +40,21 @@ func cmdRecord(args []string) error {
 	mergeHead, midMerge, err := r.mergeHead()
 	if err != nil {
 		return fmt.Errorf("reading merge state: %w", err)
+	}
+	if midMerge {
+		// Remove merge's comparison sidecars before diffing the working
+		// tree — they're tooling, not content, and must never end up
+		// picked up as a newly-tracked file in the merge's own patch.
+		sidecars, err := r.mergeSidecars()
+		if err != nil {
+			return fmt.Errorf("reading merge state: %w", err)
+		}
+		for _, s := range sidecars {
+			full := filepath.Join(r.root, filepath.FromSlash(s))
+			if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("removing %s: %w", s, err)
+			}
+		}
 	}
 
 	var base patches.Index
@@ -91,6 +108,9 @@ func cmdRecord(args []string) error {
 	}
 	if midMerge {
 		if err := r.clearMergeHead(); err != nil {
+			return fmt.Errorf("clearing merge state: %w", err)
+		}
+		if err := r.clearMergeSidecars(); err != nil {
 			return fmt.Errorf("clearing merge state: %w", err)
 		}
 	}
