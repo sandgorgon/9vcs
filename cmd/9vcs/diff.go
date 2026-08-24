@@ -38,7 +38,7 @@ func cmdDiff(args []string) error {
 // diffWorkingTree prints the difference between the materialized state at
 // base and the actual working-tree files — the uncommitted-changes view.
 func diffWorkingTree(r *repo, base patches.Hash) error {
-	idx, err := patches.Materialize(r.store, base)
+	idx, err := r.materialize(base)
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
 	}
@@ -63,11 +63,11 @@ func diffRefs(r *repo, a, b string) error {
 	if err != nil {
 		return fmt.Errorf("diff: %w", err)
 	}
-	idxA, err := patches.Materialize(r.store, ha)
+	idxA, err := r.materialize(ha)
 	if err != nil {
 		return fmt.Errorf("replaying %s: %w", a, err)
 	}
-	idxB, err := patches.Materialize(r.store, hb)
+	idxB, err := r.materialize(hb)
 	if err != nil {
 		return fmt.Errorf("replaying %s: %w", b, err)
 	}

@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/synth"
 )
 
 // dotDir is the on-disk root for all local repo state, sibling to .git.
@@ -24,6 +25,7 @@ type repo struct {
 	dir   string // .9vcs
 	store *patches.Store
 	blobs *patches.BlobStore
+	cache *synth.Cache // memoizes materialize within this one invocation
 
 	// refMu guards setRefHashCAS's check-then-write against concurrent
 	// peer connections within one `9vcs serve` process — the only case
@@ -68,7 +70,17 @@ func openRepo(root string) (*repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &repo{root: root, dir: dir, store: store, blobs: blobs}, nil
+	return &repo{root: root, dir: dir, store: store, blobs: blobs, cache: synth.NewCache(store)}, nil
+}
+
+// materialize is patches.Materialize(r.store, roots...), memoized for
+// the lifetime of this repo value (i.e. this one command invocation) —
+// see synth.Cache. A single command commonly replays overlapping
+// closures more than once (a merge preview materializes ours, theirs,
+// and their union all in one call), so every command in this package
+// should call this instead of patches.Materialize directly.
+func (r *repo) materialize(roots ...patches.Hash) (patches.Index, error) {
+	return r.cache.Materialize(roots...)
 }
 
 func (r *repo) headFile() string { return filepath.Join(r.dir, "HEAD") }

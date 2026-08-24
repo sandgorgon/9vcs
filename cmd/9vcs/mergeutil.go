@@ -32,15 +32,15 @@ type mergeConflict struct {
 // actually matches what's on disk mid-merge — so this is the one place it
 // happens, called by both.
 func computeMerge(r *repo, ours, theirs patches.Hash) (patches.Index, []mergeConflict, error) {
-	merged, err := patches.Materialize(r.store, ours, theirs)
+	merged, err := r.materialize(ours, theirs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("replaying merged history: %w", err)
 	}
-	oursIdx, err := patches.Materialize(r.store, ours)
+	oursIdx, err := r.materialize(ours)
 	if err != nil {
 		return nil, nil, fmt.Errorf("replaying current history: %w", err)
 	}
-	theirsIdx, err := patches.Materialize(r.store, theirs)
+	theirsIdx, err := r.materialize(theirs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("replaying target history: %w", err)
 	}

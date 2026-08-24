@@ -60,7 +60,7 @@ func cmdMerge(args []string) error {
 		return nil
 	}
 
-	oursIdx, err := patches.Materialize(r.store, ours)
+	oursIdx, err := r.materialize(ours)
 	if err != nil {
 		return fmt.Errorf("replaying current history: %w", err)
 	}
@@ -78,7 +78,7 @@ func cmdMerge(args []string) error {
 	}
 	if theirsClosure[ours] {
 		// Fast-forward: our own history is already a prefix of theirs.
-		theirsIdx, err := patches.Materialize(r.store, theirs)
+		theirsIdx, err := r.materialize(theirs)
 		if err != nil {
 			return fmt.Errorf("replaying %s: %w", rest[0], err)
 		}
@@ -108,7 +108,7 @@ func cmdMerge(args []string) error {
 			continue
 		}
 		if theirsIdx == nil {
-			theirsIdx, err = patches.Materialize(r.store, theirs)
+			theirsIdx, err = r.materialize(theirs)
 			if err != nil {
 				return fmt.Errorf("replaying %s: %w", rest[0], err)
 			}

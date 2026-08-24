@@ -37,7 +37,7 @@ func cmdCheckout(args []string) error {
 	}
 
 	// Refuse to clobber uncommitted work, same as git's real checkout safety check.
-	base, err := patches.Materialize(r.store, oldHead)
+	base, err := r.materialize(oldHead)
 	if err != nil {
 		return fmt.Errorf("replaying current history: %w", err)
 	}
@@ -85,7 +85,7 @@ func cmdCheckout(args []string) error {
 		targetHash, branch = h, ""
 	}
 
-	target, err := patches.Materialize(r.store, targetHash)
+	target, err := r.materialize(targetHash)
 	if err != nil {
 		return fmt.Errorf("replaying target history: %w", err)
 	}

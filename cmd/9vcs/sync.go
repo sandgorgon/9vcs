@@ -184,7 +184,7 @@ func pullRef(r *repo, localName string, localHash, remoteHash patches.Hash) erro
 		return err
 	}
 	if branch == localName {
-		oldIdx, err := patches.Materialize(r.store, localHash)
+		oldIdx, err := r.materialize(localHash)
 		if err != nil {
 			return err
 		}
@@ -195,7 +195,7 @@ func pullRef(r *repo, localName string, localHash, remoteHash patches.Hash) erro
 		if len(dirty) > 0 {
 			return fmt.Errorf("%q is checked out and has uncommitted changes that would be overwritten; record or discard them first", localName)
 		}
-		newIdx, err := patches.Materialize(r.store, remoteHash)
+		newIdx, err := r.materialize(remoteHash)
 		if err != nil {
 			return err
 		}

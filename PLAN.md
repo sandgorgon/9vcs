@@ -363,12 +363,44 @@ used to say:
   command's own choice, not an incidental one). A per-connection
   concurrent-request cap — decision #7's "phase-2 if needed" — is still
   deliberately not built.
+- `synth/`: built, as its own package (matching the originally proposed
+  module layout — see "Resolved" below for where it diverges), and
+  wired into every `cmd/9vcs` command via a `repo.materialize` method
+  that replaces direct `patches.Materialize` calls. `synth.Cache` is a
+  plain, unbounded in-memory map from a roots-tuple key to the resulting
+  `Index`, scoped to one `repo` value's lifetime (i.e. one CLI
+  invocation): correct with zero invalidation logic, because patches are
+  immutable and content-addressed, so `Materialize(store, roots...)` is
+  a pure function of `roots` alone — see `synth/cache.go`'s doc comment.
+  This targets a real, found-not-assumed redundancy: a single `merge`
+  invocation replays `ours`, `theirs`, *and* their union in one call
+  (`mergeutil.go`), which used to mean three full closure replays where
+  two branches' histories overlap substantially; now the overlapping
+  work happens once. `TestCacheHitNeverTouchesStore` in `synth/` proves
+  a repeat call is a genuine hit (not just a correct recomputation) by
+  deleting the backing patch object between calls and confirming the
+  second call still succeeds. Verified live too: a clean merge, a real
+  text conflict with resolution, `diff`, and `checkout` all still
+  produce correct output with the cache wired in.
+
+  What this does *not* solve: a cache scoped to one process gives
+  nothing back across separate CLI invocations, so a growing repo's
+  total history still costs more to replay from scratch release over
+  release — the concern PLAN.md's original synth/ design actually named
+  was in-memory caching for a long-running process (`serve --view`,
+  still unbuilt) rather than cross-invocation persistence, which the
+  CLI-first design in decision #4 explicitly avoids needing ("nothing to
+  keep alive between invocations"). A disk-persisted, cross-invocation
+  cache was considered and deliberately not built: it would need either
+  an unproven "merge two independently-replayed graphs" primitive (risky
+  — could silently break the reproducible fork-ordering guarantee
+  `topoOrder`'s own doc comment calls out as required for two peers to
+  materialize identical bytes) or a linear-history-only fast path that
+  falls back to a full replay for any merge patch, which is a real
+  future option if the per-invocation cache turns out not to be enough.
 
 ## Open items to revisit
 
-- `synth/` (the materialization cache) hasn't been built — every
-  `Materialize` call replays full history from the root with no
-  caching, a deliberate, called-out-at-the-time simplification.
 - Bundle export/import (decision #8: signed, offline patch exchange)
   isn't built.
 - iOS build: checked from this Linux dev environment, and it cannot be

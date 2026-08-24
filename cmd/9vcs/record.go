@@ -67,7 +67,7 @@ func cmdRecord(args []string) error {
 		// disk for that path, corrupting line identity on the next edit.
 		base, mergeConflicts, err = computeMerge(r, head, mergeHead)
 	} else {
-		base, err = patches.Materialize(r.store, head)
+		base, err = r.materialize(head)
 	}
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
