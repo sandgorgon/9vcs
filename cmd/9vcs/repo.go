@@ -2,10 +2,12 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
@@ -22,6 +24,15 @@ type repo struct {
 	dir   string // .9vcs
 	store *patches.Store
 	blobs *patches.BlobStore
+
+	// refMu guards setRefHashCAS's check-then-write against concurrent
+	// peer connections within one `9vcs serve` process — the only case
+	// where ref writes are actually concurrent (every local command is
+	// its own process invocation, not a goroutine racing others in the
+	// same one). Cross-process races on the plain ref files remain
+	// unguarded, same as every other local write in this repo; not
+	// something reconcile introduces or is trying to solve.
+	refMu sync.Mutex
 }
 
 var errNotARepo = errors.New("not a 9vcs repository (or any parent directory)")
@@ -127,6 +138,56 @@ func (r *repo) setRefHash(name string, h patches.Hash) error {
 	return os.WriteFile(r.refPath(name), []byte(h.String()+"\n"), 0o644)
 }
 
+// errRefConflict marks a CAS ref-write failure: the caller's view of the
+// ref (old) no longer matches its actual current value. Wrapped, not
+// returned bare, so a caller can errors.Is against it if it ever needs to
+// distinguish this from other failures (a malformed request, an unknown
+// hash) — reconcile currently just surfaces the message as-is, since base
+// 9P2000 has no structured error codes to preserve the distinction across
+// the wire anyway (see PLAN.md's library facts: no .u/.L extensions).
+var errRefConflict = errors.New("ref changed since last observed")
+
+// setRefHashCAS updates name's ref to new, but only if its current value
+// is exactly old (the zero hash meaning "must not exist yet") — the
+// write side of vcsfs's /refs contract (see vcsfs.RefWriter), and the
+// only ref-write path that needs to guard against a concurrent write
+// from another peer connection; see refMu.
+func (r *repo) setRefHashCAS(name string, old, new patches.Hash) error {
+	if !new.IsZero() && !r.store.Has(new) {
+		return fmt.Errorf("cannot point %q at unknown patch %s", name, new)
+	}
+	r.refMu.Lock()
+	defer r.refMu.Unlock()
+
+	// Refuse to move the branch currently checked out here — same
+	// default git ships (receive.denyCurrentBranch=refuse). Updating it
+	// out from under the working tree wouldn't corrupt anything (the
+	// object store stays correct either way), but the working tree would
+	// silently stop matching HEAD's ref until someone happens to
+	// checkout/diff and gets a confusing wall of "uncommitted changes"
+	// that were never actually made locally. A local `record` or `merge`
+	// never hits this: they always update the working tree and the ref
+	// together, in the same command.
+	if branch, err := r.currentBranch(); err != nil {
+		return err
+	} else if branch == name {
+		return fmt.Errorf("refusing to update %q: it is the branch currently checked out here — the working tree would desync from it; check out a different branch here first, or push under a different name", name)
+	}
+
+	current, exists, err := r.refHash(name)
+	if err != nil {
+		return err
+	}
+	if exists {
+		if current != old {
+			return fmt.Errorf("%w: %q is at %s, not %s", errRefConflict, name, current, old)
+		}
+	} else if !old.IsZero() {
+		return fmt.Errorf("%w: %q does not exist, expected %s", errRefConflict, name, old)
+	}
+	return r.setRefHash(name, new)
+}
+
 func (r *repo) mergeHeadFile() string { return filepath.Join(r.dir, "MERGE_HEAD") }
 
 // mergeHead reads the in-progress merge's other side, if any. Its presence
@@ -215,6 +276,9 @@ type refAdapter struct{ r *repo }
 
 func (a refAdapter) RefHash(name string) (patches.Hash, bool, error) { return a.r.refHash(name) }
 func (a refAdapter) ListRefs() ([]string, error)                     { return a.r.listBranches() }
+func (a refAdapter) SetRefHash(name string, old, new patches.Hash) error {
+	return a.r.setRefHashCAS(name, old, new)
+}
 
 // listBranches returns every branch name with a ref file, sorted.
 func (r *repo) listBranches() ([]string, error) {

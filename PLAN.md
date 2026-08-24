@@ -278,7 +278,7 @@ the actual upgrade, not a review UI.
 with "usable as a CLI in any environment" and "no default persistent
 daemon.")
 
-## Status (as of 2026-08-24)
+## Status (as of 2026-08-23)
 
 Local-only operation is built and working: `go.mod`, `objstore/patches`
 (patch object model, on-disk CAS, per-file line graph, deterministic
@@ -287,19 +287,43 @@ DAG replay), and `cmd/9vcs` with `init`/`record`/`log`/`branch`/`diff`/
 (line-level forks, binary conflicts with a comparison sidecar, and
 modify/delete races), not a 3-way text diff.
 
-The networking foundation is now built too, verified end to end (two
+The networking foundation is built too, verified end to end (two
 separate simulated peers — distinct identities, real TLS 1.3 over real
 loopback TCP, real 9P): `identity/` (Ed25519 keypair + self-signed
 cert, fingerprint-based peer auth per decision #7, `authorized-peers`
 allowlist), `vcsfs/` (Store/BlobStore/refs as a 9P `server.FileSystem`,
-read-only), `9vcs serve` (the manual accept loop decision #7 calls
-for), `9vcs import` (one-directional content-addressed pull,
-fast-forward only — refuses on divergence, which is exactly reconcile's
-job to handle). `reconcile` itself — the bidirectional case — is the
-one piece of the original open item below still open.
+now read-write — `/refs` writes are CAS-protected, see below), `9vcs
+serve` (the manual accept loop decision #7 calls for), `9vcs import`
+(one-directional content-addressed pull, fast-forward only — refuses on
+divergence).
+
+`9vcs reconcile` — the bidirectional case, the last piece of the
+original open item below — is now built too, verified end to end
+against all four directions (up to date, pull, push, genuine
+divergence) over the same two-peer TLS/9P setup: it classifies which
+direction is safe (`sync.go`'s `classify`), pulls or pushes the closure
+of missing patches/blobs accordingly, and on real divergence fetches
+the missing history but leaves both refs untouched, deferring to a
+local `checkout` + `merge` rather than trying to resolve or propose a
+conflict over the wire — there's no working tree or human on the far
+end of a reconcile to resolve one against, so this ended up simpler
+than originally envisioned: no wire-level conflict-proposal protocol
+was needed, just fetch-then-defer. Pushing to a ref that's the *peer's* currently
+checked-out branch is refused server-side (`setRefHashCAS`, same
+default as git's `receive.denyCurrentBranch=refuse`) — needed because,
+unlike git, this design has no remote-tracking refs to keep a pushed-to
+peer's working tree and HEAD ref from silently desyncing.
 
 Resolved along the way, superseding what the original open items below
 used to say:
+
+- `client.Create`/`Client.Create` (github.com/sandgorgon/9p v0.3.0) and
+  `Tclunk`/`Tremove` now propagating `File.Close`'s error instead of
+  discarding it (v0.4.0) were both found to be missing/broken while
+  building this, specced and reported upstream, fixed there, and
+  adopted here — `go.mod` is on v0.4.0. reconcile's push path trusts
+  `Close`'s returned error directly as of v0.4.0; no read-back
+  verification workaround was needed once it landed.
 
 - Patch encoding: `Patch.Dependencies []Hash` (a real DAG, not a single
   parent), `LineOp{Kind, ID, Prev, Next, Content}` as explicit graph
@@ -317,17 +341,7 @@ used to say:
 
 ## Open items to revisit
 
-- Reconcile protocol specifics: bidirectional sync (both `import`
-  directions, not just pull), and exactly how a conflict discovered
-  during reconcile gets proposed/exchanged between peers rather than
-  just written to one side's working tree the way `merge` does it
-  locally. `import` proved the underlying pull mechanics work; what's
-  missing is the push direction and reusing (or not) `merge`'s
-  conflict machinery across a network boundary instead of within one
-  repo.
-- `vcsfs`'s `/refs` is read-only — no CAS-protected write yet, needed
-  for reconcile's push side.
-- No known-peers/TOFU on the client side yet — `import` only supports
+- No known-peers/TOFU on the client side yet — `import`/`reconcile` only support
   an explicit `-peer-fingerprint` pin, one of the two options decision
   #7 named ("either... or"), deliberately deferred rather than building
   interactive first-connect prompting before there was any use for it.

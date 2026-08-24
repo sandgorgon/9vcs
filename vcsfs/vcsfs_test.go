@@ -33,6 +33,19 @@ func (r fakeRefs) RefHash(name string) (patches.Hash, bool, error) {
 	return h, ok, nil
 }
 
+func (r fakeRefs) SetRefHash(name string, old, new patches.Hash) error {
+	current, exists := r[name]
+	if exists {
+		if current != old {
+			return fmt.Errorf("ref conflict: %q is at %s, not %s", name, current, old)
+		}
+	} else if !old.IsZero() {
+		return fmt.Errorf("ref conflict: %q does not exist, expected %s", name, old)
+	}
+	r[name] = new
+	return nil
+}
+
 func (r fakeRefs) ListRefs() ([]string, error) {
 	names := make([]string, 0, len(r))
 	for k := range r {

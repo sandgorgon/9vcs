@@ -35,6 +35,8 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "import":
 		err = cmdImport(os.Args[2:])
+	case "reconcile":
+		err = cmdReconcile(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -64,5 +66,8 @@ commands:
   serve <addr>                serve this repo over 9P+TLS to peers in .9vcs/authorized-peers
   import -peer-fingerprint <hex> <addr> <ref-name> [<local-name>]
                                pull a ref and its missing patches/blobs from a peer (fast-forward only)
+  reconcile -peer-fingerprint <hex> <addr> <ref-name> [<local-name>]
+                               sync a ref with a peer: pull if they're ahead, push if you are,
+                               or fetch and defer to merge on real divergence
 `)
 }
