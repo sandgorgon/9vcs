@@ -1,6 +1,5 @@
 // Command 9vcs is the single CLI binary for the 9vcs version control
-// system. This scaffold implements only the fully local, no-networking
-// commands: init, record, log. See PLAN.md for the full design.
+// system. See PLAN.md for the full design.
 package main
 
 import (
@@ -30,6 +29,12 @@ func main() {
 		err = cmdDiff(os.Args[2:])
 	case "merge":
 		err = cmdMerge(os.Args[2:])
+	case "identity":
+		err = cmdIdentity(os.Args[2:])
+	case "serve":
+		err = cmdServe(os.Args[2:])
+	case "import":
+		err = cmdImport(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -55,5 +60,9 @@ commands:
   checkout [-b] <name-or-hash> switch the working tree to a branch or patch
   diff [<ref>] [<ref>]        show uncommitted changes, or the difference between two points
   merge <name-or-hash>        merge a branch or patch into the current branch
+  identity show               print this install's fingerprint, for out-of-band exchange
+  serve <addr>                serve this repo over 9P+TLS to peers in .9vcs/authorized-peers
+  import -peer-fingerprint <hex> <addr> <ref-name> [<local-name>]
+                               pull a ref and its missing patches/blobs from a peer (fast-forward only)
 `)
 }

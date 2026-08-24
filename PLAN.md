@@ -285,8 +285,18 @@ Local-only operation is built and working: `go.mod`, `objstore/patches`
 DAG replay), and `cmd/9vcs` with `init`/`record`/`log`/`branch`/`diff`/
 `checkout`/`merge` — including true patch-graph conflict detection
 (line-level forks, binary conflicts with a comparison sidecar, and
-modify/delete races), not a 3-way text diff. None of this touches the
-network; `9p` hasn't been imported yet.
+modify/delete races), not a 3-way text diff.
+
+The networking foundation is now built too, verified end to end (two
+separate simulated peers — distinct identities, real TLS 1.3 over real
+loopback TCP, real 9P): `identity/` (Ed25519 keypair + self-signed
+cert, fingerprint-based peer auth per decision #7, `authorized-peers`
+allowlist), `vcsfs/` (Store/BlobStore/refs as a 9P `server.FileSystem`,
+read-only), `9vcs serve` (the manual accept loop decision #7 calls
+for), `9vcs import` (one-directional content-addressed pull,
+fast-forward only — refuses on divergence, which is exactly reconcile's
+job to handle). `reconcile` itself — the bidirectional case — is the
+one piece of the original open item below still open.
 
 Resolved along the way, superseding what the original open items below
 used to say:
@@ -307,11 +317,23 @@ used to say:
 
 ## Open items to revisit
 
-- Reconcile protocol specifics: bidirectional vs. directional sync
-  semantics, exactly how conflict patches get proposed/exchanged
-  between peers (not just recorded locally). Nothing networked exists
-  yet — `serve`/`import`/`reconcile`, the 9P transport, and the
-  `identity`/TLS peer-auth layer are all still unbuilt.
+- Reconcile protocol specifics: bidirectional sync (both `import`
+  directions, not just pull), and exactly how a conflict discovered
+  during reconcile gets proposed/exchanged between peers rather than
+  just written to one side's working tree the way `merge` does it
+  locally. `import` proved the underlying pull mechanics work; what's
+  missing is the push direction and reusing (or not) `merge`'s
+  conflict machinery across a network boundary instead of within one
+  repo.
+- `vcsfs`'s `/refs` is read-only — no CAS-protected write yet, needed
+  for reconcile's push side.
+- No known-peers/TOFU on the client side yet — `import` only supports
+  an explicit `-peer-fingerprint` pin, one of the two options decision
+  #7 named ("either... or"), deliberately deferred rather than building
+  interactive first-connect prompting before there was any use for it.
+- No internet-facing hardening (connection cap, per-IP rate limit,
+  Msize cap) on `9vcs serve` — fine for the trusted/local testing this
+  has actually been run under, not yet for exposure to the internet.
 - `synth/` (the materialization cache) hasn't been built — every
   `Materialize` call replays full history from the root with no
   caching, a deliberate, called-out-at-the-time simplification.

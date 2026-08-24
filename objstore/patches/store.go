@@ -32,6 +32,11 @@ func (s *Store) Get(h Hash) (*Patch, error) {
 	return Decode(data)
 }
 
+// GetRaw returns the exact encoded bytes stored for h, without decoding —
+// what a 9P server serves verbatim (see vcsfs), and what a peer receiving
+// them can Decode and re-Put to both validate and store in one step.
+func (s *Store) GetRaw(h Hash) ([]byte, error) { return s.raw.get(h) }
+
 // Has reports whether h is present in the store.
 func (s *Store) Has(h Hash) bool { return s.raw.has(h) }
 

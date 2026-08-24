@@ -204,6 +204,18 @@ func (r *repo) clearMergeSidecars() error {
 	return err
 }
 
+func (r *repo) authorizedPeersFile() string { return filepath.Join(r.dir, "authorized-peers") }
+
+// refAdapter exposes repo's ref storage as a vcsfs.RefReader without
+// vcsfs needing to import cmd/9vcs (that would be backwards) and without
+// repo's own ref methods needing to be exported just for this — Go
+// interfaces are satisfied structurally, so this small same-package
+// wrapper is enough.
+type refAdapter struct{ r *repo }
+
+func (a refAdapter) RefHash(name string) (patches.Hash, bool, error) { return a.r.refHash(name) }
+func (a refAdapter) ListRefs() ([]string, error)                     { return a.r.listBranches() }
+
 // listBranches returns every branch name with a ref file, sorted.
 func (r *repo) listBranches() ([]string, error) {
 	entries, err := os.ReadDir(filepath.Join(r.dir, "refs"))
