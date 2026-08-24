@@ -5,17 +5,16 @@ package patches
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"sort"
 	"time"
-
-	"lukechampine.com/blake3"
 )
 
-// Hash is a BLAKE3-256 content hash.
+// Hash is a SHA-256 content hash.
 type Hash [32]byte
 
 func (h Hash) String() string { return hex.EncodeToString(h[:]) }
@@ -154,7 +153,7 @@ func (p *Patch) Encode() []byte {
 
 // Hash returns the content hash of p's canonical encoding.
 func (p *Patch) Hash() Hash {
-	return blake3.Sum256(p.Encode())
+	return sha256.Sum256(p.Encode())
 }
 
 // Normalize puts Changes and Dependencies into the canonical order

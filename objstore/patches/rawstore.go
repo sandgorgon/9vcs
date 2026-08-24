@@ -1,13 +1,12 @@
 package patches
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"lukechampine.com/blake3"
 )
 
 // ErrNotFound is returned when no object with the given hash exists.
@@ -37,7 +36,7 @@ func (s *rawStore) path(h Hash) string {
 }
 
 func (s *rawStore) put(data []byte) (Hash, error) {
-	h := blake3.Sum256(data)
+	h := sha256.Sum256(data)
 	path := s.path(h)
 	if _, err := os.Stat(path); err == nil {
 		return h, nil // already have it

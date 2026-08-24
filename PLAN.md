@@ -261,7 +261,7 @@ the actual upgrade, not a review UI.
 ```
 9vcs/
   go.mod                  # require github.com/sandgorgon/9p
-  objstore/patches/        # patch graph encode+hash (BLAKE3), on-disk CAS, local-only, no network
+  objstore/patches/        # patch graph encode+hash (SHA-256, stdlib), on-disk CAS, local-only, no network
   synth/                    # replay/materialization engine + in-memory cache, shared by
                              # checkout (write-once-to-disk) and serve --view (live over 9P)
   vcsfs/                    # server.FileSystem + server.File impl of the namespace above,
@@ -278,25 +278,46 @@ the actual upgrade, not a review UI.
 with "usable as a CLI in any environment" and "no default persistent
 daemon.")
 
+## Status (as of 2026-08-24)
+
+Local-only operation is built and working: `go.mod`, `objstore/patches`
+(patch object model, on-disk CAS, per-file line graph, deterministic
+DAG replay), and `cmd/9vcs` with `init`/`record`/`log`/`branch`/`diff`/
+`checkout`/`merge` — including true patch-graph conflict detection
+(line-level forks, binary conflicts with a comparison sidecar, and
+modify/delete races), not a 3-way text diff. None of this touches the
+network; `9p` hasn't been imported yet.
+
+Resolved along the way, superseding what the original open items below
+used to say:
+
+- Patch encoding: `Patch.Dependencies []Hash` (a real DAG, not a single
+  parent), `LineOp{Kind, ID, Prev, Next, Content}` as explicit graph
+  edge operations, `FileChange.Kind` (Text/Blob/Delete) for how a path
+  maps to non-text content — see `objstore/patches/graph.go`.
+- Simplified-first line-graph model: decided and built. Not Pijul's
+  full categorical treatment — see the `graph.go`/`linearize.go` doc
+  comments for exactly where this cuts corners (single reconnect route
+  through a dead node, no true multi-way concurrent-edit handling).
+- Hashing: SHA-256 (`crypto/sha256`, stdlib) — not BLAKE3. Deliberately
+  moved off BLAKE3 (and its `lukechampine.com/blake3` +
+  `klauspost/cpuid` dependencies) to keep the dependency graph
+  stdlib-only, consistent with `9p` itself being pure-Go/stdlib-only.
+  `go.mod` currently has zero non-stdlib requirements.
+
 ## Open items to revisit
 
-- Actual scaffolding hasn't started yet — go.mod, objstore/patches, and
-  a bare `cmd/9vcs` with `init`/`record`/`log` working fully locally
-  (no networking) was the agreed first step, repeatedly deferred to
-  "next" across this planning conversation.
-- Patch encoding specifics not yet designed: exact graph node/edge
-  representation, how a patch declares its dependencies, how the
-  line-graph maps to non-text (binary) files.
-- Decide whether to start with a deliberately simplified line-graph
-  patch model before attempting anything close to Pijul's full
-  categorical treatment — simplified-first was the implied direction
-  but never explicitly locked.
 - Reconcile protocol specifics: bidirectional vs. directional sync
-  semantics, exactly how conflict patches get proposed/exchanged between
-  peers (not just recorded locally).
+  semantics, exactly how conflict patches get proposed/exchanged
+  between peers (not just recorded locally). Nothing networked exists
+  yet — `serve`/`import`/`reconcile`, the 9P transport, and the
+  `identity`/TLS peer-auth layer are all still unbuilt.
+- `synth/` (the materialization cache) hasn't been built — every
+  `Materialize` call replays full history from the root with no
+  caching, a deliberate, called-out-at-the-time simplification.
+- Bundle export/import (decision #8: signed, offline patch exchange)
+  isn't built.
 - iOS Go build behavior for this stack is unverified — `sandgorgon/9p`
-  and the planned packages avoid cgo, so cross-compilation should work
-  in principle, but nothing has actually been built/tested for
+  and the packages built so far avoid cgo, so cross-compilation should
+  work in principle, but nothing has actually been built/tested for
   `GOOS=ios`.
-- Hashing choice (BLAKE3) noted but not yet pinned to a specific Go
-  package/dependency.
