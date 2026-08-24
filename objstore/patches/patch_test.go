@@ -276,6 +276,68 @@ func TestMergeConflictResolveDiscardOneSide(t *testing.T) {
 	}
 }
 
+// TestUniqueChanges: two branches diverge from a shared base — one
+// deletes a path, the other edits it. UniqueChanges must report that
+// divergence precisely: each side's own delete/modify, not anything
+// inherited from the shared history, and not the other side's actions.
+func TestUniqueChanges(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	base, idx := record(t, store, nil, "keep.txt", []string{"a"}, Index{})
+	base, idx = record(t, store, []Hash{base}, "victim.txt", []string{"one", "two"}, idx)
+
+	// ours: deletes victim.txt, leaves keep.txt untouched.
+	oursDel := &Patch{
+		Dependencies: []Hash{base},
+		Message:      "ours deletes victim.txt",
+		Changes:      []FileChange{{Path: "victim.txt", Kind: KindDelete}},
+	}
+	ours, err := store.Put(oursDel)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// theirs: actually edits victim.txt.
+	theirs, _ := record(t, store, []Hash{base}, "victim.txt", []string{"one", "TWO-edited"}, idx)
+
+	oursClosure, err := Closure(store, ours)
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirsClosure, err := Closure(store, theirs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oursDeleted, oursModified, err := UniqueChanges(store, ours, theirsClosure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !oursDeleted["victim.txt"] {
+		t.Errorf("ours' unique changes should show victim.txt deleted")
+	}
+	if oursModified["victim.txt"] || oursModified["keep.txt"] {
+		t.Errorf("ours didn't modify anything: got modified=%v", oursModified)
+	}
+
+	theirsDeleted, theirsModified, err := UniqueChanges(store, theirs, oursClosure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(theirsDeleted) != 0 {
+		t.Errorf("theirs deleted nothing: got %v", theirsDeleted)
+	}
+	if !theirsModified["victim.txt"] {
+		t.Errorf("theirs' unique changes should show victim.txt modified")
+	}
+	if theirsModified["keep.txt"] {
+		t.Errorf("keep.txt is shared history, not unique to theirs: got %v", theirsModified)
+	}
+}
+
 func containsAll(hay []string, needles ...string) bool {
 	set := map[string]bool{}
 	for _, h := range hay {

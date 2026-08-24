@@ -58,8 +58,14 @@ func cmdRecord(args []string) error {
 	}
 
 	var base patches.Index
+	var mergeConflicts []mergeConflict
 	if midMerge {
-		base, err = patches.Materialize(r.store, head, mergeHead)
+		// The same resolution merge used to decide what to write to the
+		// working tree, not a raw Materialize — a raw union wouldn't
+		// know to prefer a modified path over one that lost a
+		// modify/delete race, and would disagree with what's actually on
+		// disk for that path, corrupting line identity on the next edit.
+		base, mergeConflicts, err = computeMerge(r, head, mergeHead)
 	} else {
 		base, err = patches.Materialize(r.store, head)
 	}
@@ -71,6 +77,43 @@ func cmdRecord(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// A modify/delete conflict resolved by keeping the content (as
+	// opposed to honoring the deletion, which changedFiles already
+	// handles fine — a delete is unambiguous regardless of graph state)
+	// needs an explicit, self-contained FileChange here, even when
+	// nothing textually differs from base. Without one, nothing in this
+	// patch actually pins the outcome: a future replay still has to pick
+	// between the deleting patch and the modifying patch by the same
+	// deterministic topological tiebreak that created the conflict, and
+	// there's no guarantee it resolves the way base (and the working
+	// tree, right now) happens to show. A fresh full insert is the only
+	// form that's correct regardless of that tiebreak — it doesn't
+	// depend on which graph object survived replay to diff against.
+	for _, c := range mergeConflicts {
+		if c.Kind != "modify/delete" {
+			continue
+		}
+		full := filepath.Join(r.root, filepath.FromSlash(c.Path))
+		content, err := os.ReadFile(full)
+		if os.IsNotExist(err) {
+			continue // honoring the deletion; changedFiles' KindDelete already covers it
+		}
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", c.Path, err)
+		}
+		if isBinary(content) {
+			hash, err := r.blobs.Put(content)
+			if err != nil {
+				return fmt.Errorf("storing blob for %s: %w", c.Path, err)
+			}
+			changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindBlob, Blob: hash}
+			continue
+		}
+		ops, _ := patches.Diff(nil, splitLines(string(content)))
+		changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindText, Ops: ops, TrailingNewline: hasTrailingNewline(content)}
+	}
+
 	if len(changes) == 0 && !midMerge {
 		fmt.Println("nothing to record")
 		return nil

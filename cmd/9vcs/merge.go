@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
@@ -73,16 +72,16 @@ func cmdMerge(args []string) error {
 		return fmt.Errorf("merge: uncommitted changes would be overwritten; record or discard them first")
 	}
 
-	theirsIdx, err := patches.Materialize(r.store, theirs)
-	if err != nil {
-		return fmt.Errorf("replaying %s: %w", rest[0], err)
-	}
 	theirsClosure, err := patches.Closure(r.store, theirs)
 	if err != nil {
 		return fmt.Errorf("replaying %s: %w", rest[0], err)
 	}
 	if theirsClosure[ours] {
 		// Fast-forward: our own history is already a prefix of theirs.
+		theirsIdx, err := patches.Materialize(r.store, theirs)
+		if err != nil {
+			return fmt.Errorf("replaying %s: %w", rest[0], err)
+		}
 		if err := writeWorkingTree(r, oursIdx, theirsIdx); err != nil {
 			return fmt.Errorf("writing working tree: %w", err)
 		}
@@ -93,36 +92,32 @@ func cmdMerge(args []string) error {
 		return nil
 	}
 
-	merged, err := patches.Materialize(r.store, ours, theirs)
+	merged, conflicts, err := computeMerge(r, ours, theirs)
 	if err != nil {
-		return fmt.Errorf("replaying merged history: %w", err)
+		return err
 	}
 
-	// Binary paths have no line-graph fork mechanism to detect divergence
-	// automatically — check directly, and fall back to keeping our own
-	// content in place, same tradeoff git makes for binary conflicts.
-	// Theirs' content is written alongside as a comparison sidecar (e.g.
-	// "logo.png.theirs" next to "logo.png") so there's actually something
-	// to look at while deciding — record deletes it once the merge is
-	// finalized, it's not tracked content.
-	var conflicts []string
+	// Binary conflicts get theirs' content written alongside as a
+	// comparison sidecar (e.g. "logo.png.theirs" next to "logo.png", which
+	// computeMerge already resolved to keep ours) — record deletes it once
+	// the merge is finalized, it's not tracked content.
 	var sidecars []string
-	for p, ourSt := range oursIdx {
-		if ourSt.Kind != patches.KindBlob {
+	var theirsIdx patches.Index
+	for _, c := range conflicts {
+		if c.Kind != "binary" {
 			continue
 		}
-		theirSt, ok := theirsIdx[p]
-		if !ok || theirSt.Kind != patches.KindBlob || theirSt.Blob == ourSt.Blob {
-			continue
+		if theirsIdx == nil {
+			theirsIdx, err = patches.Materialize(r.store, theirs)
+			if err != nil {
+				return fmt.Errorf("replaying %s: %w", rest[0], err)
+			}
 		}
-		conflicts = append(conflicts, p)
-		merged[p] = ourSt
-
-		data, err := r.blobs.Get(theirSt.Blob)
+		data, err := r.blobs.Get(theirsIdx[c.Path].Blob)
 		if err != nil {
-			return fmt.Errorf("reading blob for %s: %w", p, err)
+			return fmt.Errorf("reading blob for %s: %w", c.Path, err)
 		}
-		sidecar := binaryConflictSidecar(p)
+		sidecar := binaryConflictSidecar(c.Path)
 		full := filepath.Join(r.root, filepath.FromSlash(sidecar))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return err
@@ -131,14 +126,6 @@ func cmdMerge(args []string) error {
 			return fmt.Errorf("writing %s: %w", sidecar, err)
 		}
 		sidecars = append(sidecars, sidecar)
-	}
-	for p, st := range merged {
-		if st.Kind != patches.KindText || st.Graph == nil {
-			continue
-		}
-		if _, forks := patches.Linearize(st.Graph); len(forks) > 0 {
-			conflicts = append(conflicts, p)
-		}
 	}
 
 	if err := writeWorkingTree(r, oursIdx, merged); err != nil {
@@ -155,14 +142,16 @@ func cmdMerge(args []string) error {
 		fmt.Println("merged cleanly; run `9vcs record` to finish")
 		return nil
 	}
-	sort.Strings(conflicts)
 	fmt.Println("automatic merge failed; fix conflicts, then run `9vcs record` to finish:")
-	for _, p := range conflicts {
-		if st, ok := oursIdx[p]; ok && st.Kind == patches.KindBlob {
-			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", p, binaryConflictSidecar(p))
-			continue
+	for _, c := range conflicts {
+		switch c.Kind {
+		case "binary":
+			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", c.Path, binaryConflictSidecar(c.Path))
+		case "modify/delete":
+			fmt.Printf("  CONFLICT (modify/delete): %s — deleted by %s, modified by the other side; kept the modified version\n", c.Path, c.DeletedBy)
+		default:
+			fmt.Printf("  CONFLICT: %s\n", c.Path)
 		}
-		fmt.Printf("  CONFLICT: %s\n", p)
 	}
 	return nil
 }

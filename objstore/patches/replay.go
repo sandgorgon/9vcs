@@ -143,6 +143,41 @@ func History(store *Store, roots ...Hash) ([]HistoryEntry, error) {
 	return out, nil
 }
 
+// UniqueChanges scans every patch reachable from hash but not in exclude
+// (typically the other merge side's closure — i.e. "what did this branch
+// do on its own that the other side never saw"), returning the paths it
+// explicitly deleted and the paths it otherwise changed (text or blob).
+//
+// This is what a modify/delete conflict needs and Materialize's plain
+// union can't surface on its own: a delete and an edit to the same path
+// don't fork the way two competing inserts do (there's no graph-level
+// mechanism for it), so whichever patch happens to apply later in the
+// deterministic topological order just silently wins. A caller detects
+// the race directly: if this branch deleted a path the other branch's own
+// UniqueChanges shows as modified (and the other branch's materialized
+// state still has it), that's the conflict.
+func UniqueChanges(store *Store, hash Hash, exclude map[Hash]bool) (deleted, modified map[string]bool, err error) {
+	closure, err := closureOf(store, hash)
+	if err != nil {
+		return nil, nil, err
+	}
+	deleted = map[string]bool{}
+	modified = map[string]bool{}
+	for h, p := range closure {
+		if exclude[h] {
+			continue
+		}
+		for _, fc := range p.Changes {
+			if fc.Kind == KindDelete {
+				deleted[fc.Path] = true
+			} else {
+				modified[fc.Path] = true
+			}
+		}
+	}
+	return deleted, modified, nil
+}
+
 // Materialize replays every patch transitively reachable from roots, in
 // dependency order, reconstructing the state of every path touched along
 // the way. Passing more than one root is how a merge is materialized: the
