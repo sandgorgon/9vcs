@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -40,8 +41,6 @@ func cmdServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "9vcs serve: warning: %s is empty or missing; no peer will be able to connect\n", r.authorizedPeersFile())
 	}
 
-	// One shared config, not one per connection: authorized never changes
-	// mid-process, and tls.Config is safe to reuse across connections.
 	tlsCfg := id.ServerTLSConfig(func(fp string) bool { return authorized.Allows(fp, identity.PermRead) })
 
 	ln, err := net.Listen("tcp", addr)
@@ -51,47 +50,49 @@ func cmdServe(args []string) error {
 	defer ln.Close()
 	fmt.Printf("serving %s on %s, identity %s\n", r.root, ln.Addr(), id.Fingerprint())
 
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			return fmt.Errorf("serve: accept: %w", err)
-		}
-		go handlePeer(r, conn, tlsCfg, authorized)
+	// One shared FS for every connection: unlike before ConnContext
+	// existed, per-connection identity no longer needs its own FS
+	// instance — it flows through the request context instead (see
+	// ConnContext below and vcsfs.WithPermission).
+	fsys := &vcsfs.FS{Store: r.store, Blobs: r.blobs, Refs: refAdapter{r}}
+	srv := &server.Server{
+		FS: fsys,
+		// ConnContext is what replaces the hand-rolled accept loop this
+		// command used before v0.2.0: Serve itself now TLS-handshakes
+		// each connection (via tlsListener below) and calls this once per
+		// connection, before any 9P messages are read on it, to attach
+		// the verified peer's permission to that connection's requests.
+		ConnContext: func(ctx context.Context, nc net.Conn) context.Context {
+			tlsConn, ok := nc.(*tls.Conn)
+			if !ok {
+				return ctx
+			}
+			// tls.Conn handshakes lazily on first Read/Write; force it now
+			// so ConnectionState().PeerCertificates is actually populated
+			// by the time Attach runs. authorized.Allows already gated
+			// this during the handshake (ServerTLSConfig's
+			// VerifyPeerCertificate), so failure here just means Attach
+			// finds no permission in the context and refuses — the
+			// connection was already headed nowhere either way.
+			if err := tlsConn.Handshake(); err != nil {
+				fmt.Fprintf(os.Stderr, "9vcs serve: %s: handshake failed: %v\n", nc.RemoteAddr(), err)
+				return ctx
+			}
+			certs := tlsConn.ConnectionState().PeerCertificates
+			if len(certs) == 0 {
+				return ctx
+			}
+			fp, err := identity.FingerprintOf(certs[0])
+			if err != nil {
+				return ctx
+			}
+			perm := authorized[fp]
+			fmt.Printf("9vcs serve: %s connected as %s (%s)\n", nc.RemoteAddr(), fp, perm)
+			return vcsfs.WithPermission(ctx, perm)
+		},
 	}
-}
-
-// handlePeer is deliberately NOT server.Server.Serve's own accept loop —
-// per PLAN.md, Serve(l) never exposes the underlying connection, so there
-// is no hook for a verified peer identity to reach FileSystem.Attach.
-// Running the accept loop here instead, TLS-handshaking each connection
-// by hand before constructing a vcsfs.FS for it, is how that identity
-// actually gets threaded through: ServerTLSConfig's VerifyPeerCertificate
-// already refused anything not in authorized during the handshake itself,
-// so by the time this function's fingerprint lookup runs, it's guaranteed
-// to be present.
-func handlePeer(r *repo, conn net.Conn, tlsCfg *tls.Config, authorized identity.AuthorizedPeers) {
-	defer conn.Close()
-	tlsConn := tls.Server(conn, tlsCfg)
-	if err := tlsConn.Handshake(); err != nil {
-		fmt.Fprintf(os.Stderr, "9vcs serve: %s: handshake failed: %v\n", conn.RemoteAddr(), err)
-		return
+	if err := srv.Serve(tls.NewListener(ln, tlsCfg)); err != nil {
+		return fmt.Errorf("serve: %w", err)
 	}
-	peerCerts := tlsConn.ConnectionState().PeerCertificates
-	if len(peerCerts) == 0 {
-		fmt.Fprintf(os.Stderr, "9vcs serve: %s: no peer certificate presented\n", conn.RemoteAddr())
-		return
-	}
-	fp, err := identity.FingerprintOf(peerCerts[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "9vcs serve: %s: %v\n", conn.RemoteAddr(), err)
-		return
-	}
-	perm := authorized[fp]
-	fmt.Printf("9vcs serve: %s connected as %s (%s)\n", conn.RemoteAddr(), fp, perm)
-
-	fsys := &vcsfs.FS{Store: r.store, Blobs: r.blobs, Refs: refAdapter{r}, Perm: perm}
-	srv := &server.Server{FS: fsys}
-	if err := srv.ServeConn(tlsConn); err != nil {
-		fmt.Printf("9vcs serve: %s disconnected: %v\n", conn.RemoteAddr(), err)
-	}
+	return nil
 }
