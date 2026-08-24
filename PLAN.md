@@ -314,6 +314,20 @@ default as git's `receive.denyCurrentBranch=refuse`) — needed because,
 unlike git, this design has no remote-tracking refs to keep a pushed-to
 peer's working tree and HEAD ref from silently desyncing.
 
+`import`/`reconcile`'s `-peer-fingerprint` is now optional, backed by a
+client-side known-peers store (`identity.KnownPeers`,
+`~/.config/9vcs/known-peers`) with the TOFU semantics decision #7 called
+for: a genuinely new address gets an interactive first-connect trust
+prompt on stderr; a known address is checked against its recorded
+fingerprint exactly, silently on a match, with a loud refusal — no
+prompt — on a mismatch (`identity/known_peers.go`'s doc comment has the
+full rationale). An explicit `-peer-fingerprint` pin still works
+unprompted and now also (re-)records that address in known-peers, which
+doubles as the recovery path for a legitimate fingerprint change.
+Verified end to end: decline, accept-and-remember, silent reuse on a
+second call, loud refusal on a changed fingerprint with no stdin read,
+and re-pinning to recover.
+
 Resolved along the way, superseding what the original open items below
 used to say:
 
@@ -341,10 +355,6 @@ used to say:
 
 ## Open items to revisit
 
-- No known-peers/TOFU on the client side yet — `import`/`reconcile` only support
-  an explicit `-peer-fingerprint` pin, one of the two options decision
-  #7 named ("either... or"), deliberately deferred rather than building
-  interactive first-connect prompting before there was any use for it.
 - No internet-facing hardening (connection cap, per-IP rate limit,
   Msize cap) on `9vcs serve` — fine for the trusted/local testing this
   has actually been run under, not yet for exposure to the internet.

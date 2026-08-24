@@ -18,12 +18,9 @@ import (
 // "reconcile protocol" open item for why this is scoped the way it is.
 func cmdReconcile(args []string) error {
 	fs := flag.NewFlagSet("reconcile", flag.ExitOnError)
-	fingerprint := fs.String("peer-fingerprint", "", "expected fingerprint of the peer being reconciled with (required)")
+	fingerprint := fs.String("peer-fingerprint", "", "expected fingerprint of the peer, as an explicit one-off pin; omit to use the known-peers store, prompting on first connection")
 	if err := fs.Parse(args); err != nil {
 		return err
-	}
-	if *fingerprint == "" {
-		return fmt.Errorf("reconcile: -peer-fingerprint is required (see `9vcs identity show` on the peer)")
 	}
 	rest := fs.Args()
 	if len(rest) < 2 || len(rest) > 3 {

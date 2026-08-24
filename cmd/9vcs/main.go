@@ -64,10 +64,15 @@ commands:
   merge <name-or-hash>        merge a branch or patch into the current branch
   identity show               print this install's fingerprint, for out-of-band exchange
   serve <addr>                serve this repo over 9P+TLS to peers in .9vcs/authorized-peers
-  import -peer-fingerprint <hex> <addr> <ref-name> [<local-name>]
+  import [-peer-fingerprint <hex>] <addr> <ref-name> [<local-name>]
                                pull a ref and its missing patches/blobs from a peer (fast-forward only)
-  reconcile -peer-fingerprint <hex> <addr> <ref-name> [<local-name>]
+  reconcile [-peer-fingerprint <hex>] <addr> <ref-name> [<local-name>]
                                sync a ref with a peer: pull if they're ahead, push if you are,
                                or fetch and defer to merge on real divergence
+
+-peer-fingerprint pins the expected peer explicitly for one call; omit it to use
+this install's known-peers store instead (~/.config/9vcs/known-peers on Linux),
+which prompts to trust a peer the first time and refuses silently thereafter if
+its fingerprint ever changes. Either path remembers the peer for next time.
 `)
 }

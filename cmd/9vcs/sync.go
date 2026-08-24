@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	p9 "github.com/sandgorgon/9p"
@@ -13,18 +15,50 @@ import (
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
-// dialPeer connects to addr over TLS, verifying it presents fingerprint
-// (the pin the caller was given, e.g. via -peer-fingerprint), and attaches
-// to its root. Shared by import and reconcile — both start a connection
-// exactly the same way.
-func dialPeer(fingerprint, addr string) (*client.Client, error) {
+// dialPeer connects to addr over TLS and attaches to its root. Shared by
+// import and reconcile — both start a connection exactly the same way.
+//
+// pinnedFingerprint, if non-empty (the caller passed -peer-fingerprint),
+// is an explicit one-off pin: the peer must present exactly that
+// fingerprint. Otherwise the connection is verified against this
+// install's known-peers store (identity.KnownPeers): a known address
+// must match its recorded fingerprint exactly, and a genuinely new
+// address triggers an interactive first-connect trust prompt on stderr —
+// PLAN.md's "known-peers store with TOFU semantics" (known_hosts
+// behavior). Either a successful pin or a successful first-connect
+// prompt is remembered in known-peers, so later calls don't need either.
+func dialPeer(pinnedFingerprint, addr string) (*client.Client, error) {
 	id, err := identity.Load()
 	if err != nil {
 		return nil, err
 	}
-	tlsCfg := id.ClientTLSConfig(func(fp string) bool { return fp == fingerprint })
+	knownPeersPath, err := identity.KnownPeersPath()
+	if err != nil {
+		return nil, err
+	}
+	known, err := identity.LoadKnownPeers(knownPeersPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// tls.Config.VerifyPeerCertificate's callback only reports accept/
+	// refuse as a bool; verifyErr carries the specific reason back out so
+	// the caller sees more than TLS's generic handshake failure.
+	var verifyErr error
+	accept := func(presented string) bool {
+		if err := verifyPeer(knownPeersPath, known, addr, pinnedFingerprint, presented, os.Stdin); err != nil {
+			verifyErr = err
+			return false
+		}
+		return true
+	}
+
+	tlsCfg := id.ClientTLSConfig(accept)
 	conn, err := tls.Dial("tcp", addr, tlsCfg)
 	if err != nil {
+		if verifyErr != nil {
+			return nil, verifyErr
+		}
 		return nil, fmt.Errorf("connecting to %s: %w", addr, err)
 	}
 	c, err := client.NewClient(conn)
@@ -37,6 +71,51 @@ func dialPeer(fingerprint, addr string) (*client.Client, error) {
 		return nil, fmt.Errorf("attaching to %s: %w (the peer may have rejected this connection's certificate — check its authorized-peers)", addr, err)
 	}
 	return c, nil
+}
+
+// verifyPeer decides whether to trust addr's presented fingerprint,
+// consulting an explicit pin first, then the known-peers store, then —
+// on a genuine first connection — prompting on prompt (os.Stdin in
+// normal use; a fixed reader in tests). A mismatch against either the
+// pin or an existing known-peers entry is always a refusal, never a
+// prompt: a changed fingerprint for an address already vouched for is
+// exactly what TOFU exists to catch loudly, not paper over.
+func verifyPeer(knownPeersPath string, known identity.KnownPeers, addr, pinned, presented string, prompt io.Reader) error {
+	if pinned != "" {
+		if presented != pinned {
+			return fmt.Errorf("peer %s presented fingerprint %s, not the pinned %s", addr, presented, pinned)
+		}
+		return identity.RememberPeer(knownPeersPath, addr, presented)
+	}
+	if fp, ok := known[addr]; ok {
+		if presented != fp {
+			return fmt.Errorf("REMOTE FINGERPRINT HAS CHANGED for %s\n  known:     %s\n  presented: %s\nsomeone may be impersonating this peer, or it legitimately regenerated its identity — if you're sure it's legitimate, re-run with -peer-fingerprint %s to re-pin it in %s", addr, fp, presented, presented, knownPeersPath)
+		}
+		return nil
+	}
+	trust, err := promptTrustPeer(prompt, addr, presented)
+	if err != nil {
+		return fmt.Errorf("reading trust prompt response: %w", err)
+	}
+	if !trust {
+		return fmt.Errorf("connection to %s declined: fingerprint %s not trusted", addr, presented)
+	}
+	return identity.RememberPeer(knownPeersPath, addr, presented)
+}
+
+// promptTrustPeer is the "first-connect prompt" PLAN.md's TOFU decision
+// calls for: shown once per genuinely new address, never for one already
+// in known-peers (that path is either a silent match or a loud refusal —
+// see verifyPeer).
+func promptTrustPeer(in io.Reader, addr, fingerprint string) (bool, error) {
+	fmt.Fprintf(os.Stderr, "The authenticity of peer %q can't be established.\nFingerprint: %s\n", addr, fingerprint)
+	fmt.Fprint(os.Stderr, "Trust this peer and remember it for future connections? [y/N] ")
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return false, err
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
 }
 
 // syncDirection is what a local ref and a peer's ref need, relative to
