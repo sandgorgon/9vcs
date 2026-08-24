@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"time"
 
+	p9 "github.com/sandgorgon/9p"
 	"github.com/sandgorgon/9p/server"
 
 	"github.com/sandgorgon/9vcs/identity"
@@ -16,6 +18,8 @@ import (
 
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	maxConns := fs.Int("max-conns", 64, "reject new connections once this many are live at once")
+	maxConnsPerIPPerMin := fs.Int("max-conns-per-ip-per-min", 30, "reject a remote address's new connections once it exceeds this many within a minute")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -48,6 +52,12 @@ func cmdServe(args []string) error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	defer ln.Close()
+	// Both wrappers act on the raw TCP listener, ahead of the TLS
+	// handshake tls.NewListener adds below: a rejected connection here
+	// never costs a handshake's asymmetric-crypto work, which is exactly
+	// what decision #7's hardening item is guarding — see hardening.go.
+	ln = newRateLimitListener(ln, newIPRateLimiter(*maxConnsPerIPPerMin, time.Minute))
+	ln = newConnCapListener(ln, *maxConns)
 	fmt.Printf("serving %s on %s, identity %s\n", r.root, ln.Addr(), id.Fingerprint())
 
 	// One shared FS for every connection: unlike before ConnContext
@@ -57,6 +67,13 @@ func cmdServe(args []string) error {
 	fsys := &vcsfs.FS{Store: r.store, Blobs: r.blobs, Refs: refAdapter{r}}
 	srv := &server.Server{
 		FS: fsys,
+		// Pinned explicitly rather than left at the zero value: Msize
+		// already defaults to p9.DefaultMsize when unset (decision #7's
+		// "Msize capped" is satisfied either way), but leaving it
+		// implicit means this server's behavior silently follows
+		// whatever the library's default happens to be release to
+		// release, instead of a value this command actually chose.
+		Msize: p9.DefaultMsize,
 		// ConnContext is what replaces the hand-rolled accept loop this
 		// command used before v0.2.0: Serve itself now TLS-handshakes
 		// each connection (via tlsListener below) and calls this once per

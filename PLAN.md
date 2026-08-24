@@ -352,18 +352,31 @@ used to say:
   `klauspost/cpuid` dependencies) to keep the dependency graph
   stdlib-only, consistent with `9p` itself being pure-Go/stdlib-only.
   `go.mod` currently has zero non-stdlib requirements.
+- `9vcs serve` hardening: built and verified live. `cmd/9vcs/hardening.go`
+  wraps the raw TCP listener, ahead of the TLS handshake, with a
+  connection cap (`-max-conns`, default 64 — a live count via
+  `sync/atomic`, decremented on `Close`) and a per-address rate limit
+  (`-max-conns-per-ip-per-min`, default 30 — a fixed-window counter,
+  opportunistically swept, no background goroutine). `server.Msize` is
+  pinned explicitly to `p9.DefaultMsize` rather than left at the zero
+  value (the library already defaults there, but now it's this
+  command's own choice, not an incidental one). A per-connection
+  concurrent-request cap — decision #7's "phase-2 if needed" — is still
+  deliberately not built.
 
 ## Open items to revisit
 
-- No internet-facing hardening (connection cap, per-IP rate limit,
-  Msize cap) on `9vcs serve` — fine for the trusted/local testing this
-  has actually been run under, not yet for exposure to the internet.
 - `synth/` (the materialization cache) hasn't been built — every
   `Materialize` call replays full history from the root with no
   caching, a deliberate, called-out-at-the-time simplification.
 - Bundle export/import (decision #8: signed, offline patch exchange)
   isn't built.
-- iOS Go build behavior for this stack is unverified — `sandgorgon/9p`
-  and the packages built so far avoid cgo, so cross-compilation should
-  work in principle, but nothing has actually been built/tested for
-  `GOOS=ios`.
+- iOS build: checked from this Linux dev environment, and it cannot be
+  done here — not a gap in this codebase (neither it nor
+  `sandgorgon/9p` uses cgo, confirmed by grepping both for `import
+  "C"`), but a hard Go toolchain constraint: `GOOS=ios` always requires
+  external (cgo) linking regardless of whether the program itself uses
+  cgo, and satisfying that needs `clang` plus Apple's iOS SDK, which
+  ships only via Xcode — there's no Linux-hosted iOS SDK to install.
+  Still genuinely unverified; just needs an actual macOS host with
+  Xcode to attempt `GOOS=ios GOARCH=arm64 CGO_ENABLED=1 go build`.
