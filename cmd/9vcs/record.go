@@ -83,14 +83,10 @@ func cmdRecord(args []string) error {
 	// opposed to honoring the deletion, which changedFiles already
 	// handles fine — a delete is unambiguous regardless of graph state)
 	// needs an explicit, self-contained FileChange here, even when
-	// nothing textually differs from base. Without one, nothing in this
-	// patch actually pins the outcome: a future replay still has to pick
-	// between the deleting patch and the modifying patch by the same
-	// deterministic topological tiebreak that created the conflict, and
-	// there's no guarantee it resolves the way base (and the working
-	// tree, right now) happens to show. A fresh full insert is the only
-	// form that's correct regardless of that tiebreak — it doesn't
-	// depend on which graph object survived replay to diff against.
+	// nothing textually differs from base — see modifyDeleteKeptTextOps
+	// for why, and for a real order-dependent bug found and fixed the
+	// same day this comment was last touched.
+	//
 	// Reads go through an os.Root confined to r.root, not a plain
 	// filepath.Join + bare os.* call — same reasoning as
 	// writeWorkingTree's rewrite (see its doc comment): c.Path is
@@ -140,7 +136,7 @@ func cmdRecord(args []string) error {
 			changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindBlob, Blob: hash, Executable: executable}
 			continue
 		}
-		ops, _ := patches.Diff(nil, splitLines(string(content)))
+		ops := modifyDeleteKeptTextOps(base, c.Path, content)
 		changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindText, Ops: ops, TrailingNewline: hasTrailingNewline(content), Executable: executable}
 	}
 
@@ -195,4 +191,57 @@ func cmdRecord(args []string) error {
 
 	fmt.Printf("recorded %s: %s\n", hash.String()[:12], *message)
 	return nil
+}
+
+// modifyDeleteKeptTextOps builds the Ops for a modify/delete conflict's
+// kept text content (content is the winning side's raw file bytes, read
+// from the working tree). Without this needing to pin anything, a
+// future replay would still have to pick between the deleting patch and
+// the modifying patch by the same deterministic topological tiebreak
+// that created the conflict in the first place, with no guarantee it
+// resolves the way base (and the working tree, right now) shows.
+//
+// A plain fresh insert (Diff(nil, ...), under brand-new line IDs
+// unrelated to any existing history) is NOT actually safe regardless of
+// that tiebreak, despite once being implemented as exactly that — a
+// real, order-dependent bug, found and fixed the same day: Materialize
+// (objstore/patches/replay.go) wipes a path's *entire* graph object on
+// a KindDelete, not just the one node the deleting side targeted.
+// Whether that wipe lands before or after the modifying side's own
+// insert — which depends on the same hash-based topological tiebreak,
+// since both are direct dependents of the same base — decides whether
+// the modifying side's real node survives to still be alive when this
+// patch's own change applies (it always applies last, being the
+// merge). If it survives, a second fresh-ID insert for the identical
+// content creates a genuine, order-triggered fork — two alive nodes,
+// same content, both reachable — instead of the single clean line
+// intended. Confirmed live, and reproduced deterministically by
+// sampling both hash orderings directly against objstore/patches.
+//
+// Fixed by first emitting an explicit delete for every node base's own
+// graph already reports alive for this path — the *correct* existing
+// state computeMerge already resolved to (the modifying side's isolated
+// materialize, mergeutil.go's idxs[j][p]) — before the fresh insert.
+// Deleting an already-wiped, nonexistent node is a harmless no-op
+// (graph.go's Delete case creates a dead placeholder rather than
+// erroring); deleting a still-alive one neutralizes it. Either way the
+// outcome is the same single surviving node, regardless of which order
+// the wipe and the insert actually happened in.
+//
+// Scoped to KindText only — the caller's KindBlob/KindSymlink branches
+// need no equivalent, since Materialize treats both as plain value
+// overwrites, not additive graph operations, so they were never
+// susceptible to this in the first place.
+func modifyDeleteKeptTextOps(base patches.Index, path string, content []byte) []patches.LineOp {
+	ops, _ := patches.Diff(nil, splitLines(string(content)))
+	prior, ok := base[path]
+	if !ok || prior.Kind != patches.KindText || prior.Graph == nil {
+		return ops
+	}
+	existing, _ := patches.Linearize(prior.Graph)
+	kill := make([]patches.LineOp, len(existing))
+	for i, l := range existing {
+		kill[i] = patches.LineOp{Kind: patches.OpDelete, ID: l.ID}
+	}
+	return append(kill, ops...)
 }

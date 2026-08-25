@@ -596,6 +596,72 @@ appears outside the repo. Live-reconfirmed the legitimate absolute-target
 leaf symlink case round-trips correctly end to end (record, delete,
 checkout from scratch, `readlink` matches).
 
+#### Modify/delete resolution: order-dependent fork — found and fixed (2026-08-25)
+
+**Not a security vulnerability — a correctness bug, found by accident
+while live-testing the symlink fix above, then properly root-caused
+rather than patched blind.** Finalizing an ordinary modify/delete merge
+conflict (one branch edits a file, the other deletes it, resolution
+keeps the edit) intermittently left the working tree looking dirty
+immediately after `record` finished — `9vcs status` reporting `M f.txt`
+against the patch that had *just* recorded that exact content. Bisected
+first, before touching anything: reproduced identically on the
+pre-existing binary (2 of 5 runs), confirming it predated every other
+fix in this session and wasn't caused by any of them.
+
+**Root-caused with a deterministic, standalone reproduction** against
+`objstore/patches` directly (fixed patch content, no wall-clock
+`Time` field, so hashes — and therefore `topoOrder`'s tie-break between
+two simultaneously-ready patches — are reproducible run to run instead
+of effectively random the way real `record`-driven timestamps make
+them). The mechanism, confirmed empirically rather than by hand-tracing
+alone (an earlier by-hand attempt at this was wrong): `Materialize`
+wipes a path's *entire* graph object on any `KindDelete` for that path —
+not just the one node the deleting side targeted. The modify/delete
+resolution's own change (unconditionally `Diff(nil, ...)`, a fresh
+insert under a brand-new line ID) always applies last, being part of
+the merge patch — but whether the *modifying* side's own original node
+is still alive when that fresh insert runs depends entirely on whether
+the deleting side's wipe landed before or after it, which depends on
+the same hash-based topological tiebreak that created the conflict.
+When the modifying side's node survives, the fresh insert creates a
+second, independent node with identical content — a genuine,
+order-triggered fork (two alive nodes, one content, both reachable),
+not a cosmetic display glitch.
+
+**Two candidate fixes were tried and rejected before the real one,
+each disproven empirically, not assumed**: omitting the override
+entirely (fails — the deleting side's own delete can then legitimately
+win the tiebreak and wipe the file); relying on `Diff` against the
+existing content to naturally produce empty ops when nothing textually
+differs (fails for the same reason as omitting the override — an empty
+op list is a true no-op, so it doesn't pin anything either).
+
+**Fix** (`modifyDeleteKeptTextOps`, extracted out of `cmd/9vcs/record.go`
+into its own testable function): before the fresh insert, explicitly
+emit a delete for every node `base[path]`'s own graph already reports
+alive — `base` here being exactly `computeMerge`'s own already-correct
+resolution (`mergeutil.go`'s `idxs[j][p]`, the modifying side's isolated
+materialize, unaffected by the wipe since it never replays the deleting
+side at all). Deleting an already-wiped, nonexistent node is a harmless
+no-op (`graph.go`'s `Delete` case creates a dead placeholder rather than
+erroring); deleting a still-alive one neutralizes it. Either way, only
+the fresh insert's single node survives, regardless of which order the
+wipe and the insert actually happened in. Scoped to `KindText` only:
+`KindBlob`/`KindSymlink` are plain value overwrites in `Materialize`,
+not additive graph operations, so they were never susceptible to this.
+
+**Verified**: `TestModifyDeleteKeptTextOpsIsOrderIndependent` samples
+20 different patch-message salts (each producing different hashes, and
+therefore sampling both possible topological orderings — the test
+itself asserts both were actually observed, not just assumed) against
+the real `modifyDeleteKeptTextOps`/`computeMerge`, requiring every
+single one to materialize to exactly the kept content with zero forks.
+Re-ran the exact original reproduction live against the rebuilt binary
+15 times: 15/15 clean (previously roughly 40% failed) — and confirmed
+the recorded content is genuinely correct, not just coincidentally
+"clean" (`cat f.txt` shows the real kept content).
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:
