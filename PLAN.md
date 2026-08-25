@@ -1286,6 +1286,24 @@ used to say:
   trailing slash wasn't covering its own subtree). Closes the one gap
   called out as a real blocker to starting daily use with a real working
   tree, not just a nice-to-have.
+- `9vcs status`: built and verified live. No new decision needed —
+  `cmd/9vcs/status.go` is a thin, one-line-per-path summary
+  (`A`/`M`/`D`/`U`) over the exact same `changedFiles`
+  record/diff/checkout/merge/apply already share, so it's automatically
+  ignore-aware and automatically merge-aware (comparing against
+  `computeMerge`'s result, not a raw `materialize(head)`, while a merge
+  is in progress — the same reason `record.go`'s own `midMerge` branch
+  does the same thing, otherwise a path that lost a modify/delete race
+  would misreport as dirty). There's deliberately no separate staged/
+  unstaged/untracked split the way git's status has — this design has no
+  staging index at all (decision #2), so there's only one bucket of
+  "changed" to ever report. `U` reuses the exact unresolved-conflict-
+  marker check `record.go` already uses to refuse finalizing a patch.
+  Verified live: a clean tree, a mix of added/modified/deleted/ignored
+  paths in one working tree, and a real two-branch text conflict shown
+  as `U` mid-merge, correctly downgrading to `M` once markers were
+  hand-resolved and clearing to "nothing to record" once `record`
+  finalized it.
 
 ## Open items to revisit
 

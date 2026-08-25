@@ -21,6 +21,8 @@ func main() {
 		err = cmdRecord(os.Args[2:])
 	case "log":
 		err = cmdLog(os.Args[2:])
+	case "status":
+		err = cmdStatus(os.Args[2:])
 	case "branch":
 		err = cmdBranch(os.Args[2:])
 	case "checkout":
@@ -66,6 +68,7 @@ commands:
   init                        initialize a repository in the current directory
   record -m MSG               record a patch from the current working tree changes
   log [<ref>]                 show recorded patches, most recent first
+  status                       one line per changed path (A/M/D/U) — what's dirty, not the diff itself
   branch [<name> [<start>]]   list branches, or create one
   checkout [-b] <name-or-hash> switch the working tree to a branch or patch
   diff [<ref>] [<ref>]        show uncommitted changes, or the difference between two points
