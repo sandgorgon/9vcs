@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"sort"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
@@ -134,6 +135,27 @@ func renameCandidate(oldPath string, oldSt patches.PathState, newPath string, ne
 		if len(oldLines) == 0 || len(newContent) == 0 {
 			return 0, renamePair{}, false // no rename detection for an empty file on either side — nothing to meaningfully compare
 		}
+		// Exact-match fast path, checked before the expensive diff (and
+		// before the size bound below even applies): KindBlob/KindSymlink
+		// above already detect an unmodified rename by simple equality,
+		// with no O(n*m) cost at all — text never had that shortcut,
+		// always paying for a full diff even when the two files are
+		// byte-identical, the single most common real case (renaming a
+		// file without also editing it). Hashing is O(n), so this also
+		// correctly catches a huge file renamed with zero changes, which
+		// the size bound below would otherwise reject outright even
+		// though detecting *that* case never needed the expensive path.
+		//
+		// hashGraphLines/hashLines each stream content straight into
+		// one sha256.Hash rather than joining everything into one big
+		// string first -- a single hash of the whole file either way,
+		// just without doubling peak memory on a huge file by building
+		// that intermediate joined copy (or, before this change, an
+		// intermediate []string copy of oldLines just to satisfy
+		// hashLines' old signature).
+		if hashGraphLines(oldLines) == hashLines(newContent) {
+			return 1.0, renamePair{oldPath: oldPath, newPath: newPath, oldState: oldSt, newKind: patches.KindText, modified: false}, true
+		}
 		if int64(len(oldLines))*int64(len(newContent)) > maxRenameDiffCells {
 			// patches.Diff's underlying LCS is O(n*m) in both time and
 			// memory (a full 2D table, not just O(min(n,m))) — and
@@ -175,4 +197,41 @@ func insertedContent(ops []patches.LineOp) []string {
 		}
 	}
 	return out
+}
+
+// hashLines hashes lines' content as a cheap, O(n) exact-equality check
+// — SHA-256, matching the hash this codebase already uses everywhere
+// else for content addressing (patches.Hash), rather than introducing a
+// different algorithm for a one-off comparison. A newline separator
+// between lines (never itself a legal line character, since content
+// comes from already-split lines) keeps ["ab", "c"] from hashing the
+// same as ["a", "bc"].
+//
+// Streaming each line into one sha256.Hash — rather than joining every
+// line into a single string first and hashing that — still produces one
+// hash for the whole file, just without a second full-size copy of it
+// sitting in memory at once.
+func hashLines(lines []string) [32]byte {
+	h := sha256.New()
+	for _, l := range lines {
+		h.Write([]byte(l))
+		h.Write([]byte{'\n'})
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// hashGraphLines is hashLines for a FileGraph's []patches.Line — lets
+// renameCandidate hash oldLines' content directly, without first copying
+// it out into a throwaway []string just to satisfy hashLines' signature.
+func hashGraphLines(lines []patches.Line) [32]byte {
+	h := sha256.New()
+	for _, l := range lines {
+		h.Write([]byte(l.Content))
+		h.Write([]byte{'\n'})
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
 }

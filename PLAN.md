@@ -703,6 +703,27 @@ scored, the same tradeoff already accepted elsewhere in rename detection
 `TestRenameCandidateSkipsExpensiveDiffForHugeFiles` uses a pair sized
 well past the threshold and requires the call to return within 5s.
 
+**Follow-up, same day, prompted by a user question about hashing as a
+cheaper check**: the size bound above had a real gap of its own — it
+rejected an oversized pair *unconditionally*, including the case where
+the file was renamed with zero edits, which never needed the expensive
+diff to detect in the first place. `KindBlob`/`KindSymlink` above
+already skip straight to an exact-match check by hash/string equality,
+with no O(n·m) cost at all; text never had that fast path, always
+paying for a full diff even when byte-identical — the single most
+common real case (a plain rename, no edit). Fixed by hashing both
+sides' content (SHA-256, matching every other content-addressing
+decision in this codebase — no reason to introduce a different
+algorithm for a one-off equality check) *before* the size bound is even
+consulted: an exact match short-circuits to a detected, unmodified
+rename regardless of size (hashing is O(n)), and the size bound only
+ever has to reject the genuinely ambiguous case — large, and not
+identical, so an actual similarity score is needed. Verified:
+`TestRenameCandidateExactMatchDetectedEvenWhenOversized` (a pair sized
+well past the threshold, identical content, must still be detected) and
+live: renaming a real 6,000-line file with no edits is now detected
+correctly in 16ms.
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:
