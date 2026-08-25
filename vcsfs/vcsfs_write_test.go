@@ -1,6 +1,7 @@
 package vcsfs
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -254,11 +255,11 @@ func TestWriteRejectsOversizedOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	// A tiny write, at an offset just past maxObjectSize — real data
+	// A tiny write, at an offset just past MaxObjectSize — real data
 	// sent is a couple of bytes; what's under test is whether the
 	// server still tries to honor the claimed offset regardless.
-	if _, err := f.WriteAt([]byte("hi"), maxObjectSize+1); err == nil {
-		t.Error("expected a write past maxObjectSize to be rejected, got nil")
+	if _, err := f.WriteAt([]byte("hi"), MaxObjectSize+1); err == nil {
+		t.Error("expected a write past MaxObjectSize to be rejected, got nil")
 	}
 }
 
@@ -278,6 +279,93 @@ func TestWriteRejectsNegativeOffset(t *testing.T) {
 	// negative int64.
 	if _, err := f.WriteAt([]byte("hi"), -1); err == nil {
 		t.Error("expected a negative-offset write to be rejected, got nil")
+	}
+}
+
+// dialWithBudget is dialWith, but also attaches a small per-connection
+// write-buffer budget via WithWriteBudget — for exercising the
+// MaxObjectSize-bounds-one-fid-but-nothing-bounded-the-connection-total
+// gap fixed alongside it (see writeBudget's doc comment in vcsfs.go).
+func dialWithBudget(t *testing.T, fs *FS, perm identity.Permission, budget int64) *client.Client {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	srv := &server.Server{FS: fs, ConnContext: func(ctx context.Context, _ net.Conn) context.Context {
+		return WithWriteBudget(WithPermission(ctx, perm), budget)
+	}}
+	go srv.Serve(ln)
+
+	c, err := client.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	if _, err := c.Attach("test", ""); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// TestWriteBudgetRejectsExceedingConnectionTotal is the regression test
+// for a real gap: MaxObjectSize alone bounds one fid's buffer, but
+// nothing previously bounded how many fids a single connection could
+// hold open (buffering) at once — a client could Create many fids and
+// write close to MaxObjectSize into each without ever Tclunk-ing any of
+// them, live-proven at ~100 fids x ~1GiB. With a connection-wide budget
+// attached, a second fid's write that would push the connection's total
+// buffered bytes over budget must be rejected, even though neither fid
+// alone is anywhere near MaxObjectSize.
+func TestWriteBudgetRejectsExceedingConnectionTotal(t *testing.T) {
+	fs, _ := newTestFS(t)
+	c := dialWithBudget(t, fs, identity.PermWrite, 100)
+
+	p1 := &patches.Patch{Message: "first"}
+	f1, err := c.Create("patches/"+p1.Hash().String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create f1: %v", err)
+	}
+	if _, err := f1.Write(make([]byte, 60)); err != nil {
+		t.Fatalf("f1 write within budget: %v", err)
+	}
+
+	p2 := &patches.Patch{Message: "second (different content, different hash)"}
+	f2, err := c.Create("patches/"+p2.Hash().String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create f2: %v", err)
+	}
+	if _, err := f2.Write(make([]byte, 60)); err == nil {
+		t.Error("expected f2's write to be rejected — f1 (60 bytes) + f2 (60 bytes) exceeds the 100-byte connection budget")
+	}
+}
+
+// TestWriteBudgetReleasedOnClose confirms Close (Tclunk) frees a fid's
+// reservation back to its connection's budget, so a finished write
+// doesn't permanently eat into what a later one on the same connection
+// can use.
+func TestWriteBudgetReleasedOnClose(t *testing.T) {
+	fs, _ := newTestFS(t)
+	c := dialWithBudget(t, fs, identity.PermWrite, 100)
+
+	p1 := &patches.Patch{Message: "first"}
+	f1, err := c.Create("patches/"+p1.Hash().String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create f1: %v", err)
+	}
+	if _, err := f1.Write(make([]byte, 60)); err != nil {
+		t.Fatalf("f1 write within budget: %v", err)
+	}
+	f1.Close() // ignoring the error: 60 zero bytes isn't a valid encoded patch, but the budget release happens regardless of Close's outcome
+
+	p2 := &patches.Patch{Message: "second (different content, different hash)"}
+	f2, err := c.Create("patches/"+p2.Hash().String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create f2: %v", err)
+	}
+	if _, err := f2.Write(make([]byte, 60)); err != nil {
+		t.Errorf("expected f2's write to succeed after f1's budget was released by Close, got %v", err)
 	}
 }
 

@@ -372,22 +372,31 @@ func (r *repo) mergeHeads() ([]patches.Hash, error) {
 }
 
 // setMergeHeads writes heads, one per line, replacing whatever
-// MERGE_HEAD held before.
+// MERGE_HEAD held before. Atomic (temp file + rename) and lock-protected,
+// same as every other ref/HEAD write (see atomicWriteFile/withRefLock) —
+// a plain os.WriteFile here, unlike everywhere else, would let a crash
+// mid-write leave a truncated MERGE_HEAD that HashFromHex then errors on
+// for every subsequent command until manually removed, and would let a
+// concurrent writer's bytes interleave with this one's.
 func (r *repo) setMergeHeads(heads []patches.Hash) error {
 	var b strings.Builder
 	for _, h := range heads {
 		b.WriteString(h.String())
 		b.WriteString("\n")
 	}
-	return os.WriteFile(r.mergeHeadFile(), []byte(b.String()), 0o644)
+	return r.withRefLock(func() error {
+		return atomicWriteFile(r.mergeHeadFile(), []byte(b.String()))
+	})
 }
 
 func (r *repo) clearMergeHeads() error {
-	err := os.Remove(r.mergeHeadFile())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
+	return r.withRefLock(func() error {
+		err := os.Remove(r.mergeHeadFile())
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	})
 }
 
 func (r *repo) mergeSidecarsFile() string { return filepath.Join(r.dir, "MERGE_SIDECARS") }
@@ -442,12 +451,15 @@ func removeSidecarFile(r *repo, sidecar string) error {
 
 // setMergeSidecars records every sidecar path merge wrote, so record knows
 // what to clean up once it finalizes — these are merge tooling, not
-// content the user asked to track.
+// content the user asked to track. Atomic and lock-protected, same
+// reasoning as setMergeHeads.
 func (r *repo) setMergeSidecars(paths []string) error {
 	if len(paths) == 0 {
 		return nil
 	}
-	return os.WriteFile(r.mergeSidecarsFile(), []byte(strings.Join(paths, "\n")+"\n"), 0o644)
+	return r.withRefLock(func() error {
+		return atomicWriteFile(r.mergeSidecarsFile(), []byte(strings.Join(paths, "\n")+"\n"))
+	})
 }
 
 func (r *repo) mergeSidecars() ([]string, error) {
@@ -468,11 +480,13 @@ func (r *repo) mergeSidecars() ([]string, error) {
 }
 
 func (r *repo) clearMergeSidecars() error {
-	err := os.Remove(r.mergeSidecarsFile())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return err
+	return r.withRefLock(func() error {
+		err := os.Remove(r.mergeSidecarsFile())
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	})
 }
 
 func (r *repo) authorizedPeersFile() string { return filepath.Join(r.dir, "authorized-peers") }

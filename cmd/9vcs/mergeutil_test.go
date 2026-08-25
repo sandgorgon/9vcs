@@ -195,6 +195,54 @@ func TestComputeMergeThreeWayBinaryConflict(t *testing.T) {
 	}
 }
 
+// TestComputeMergeThreeWayBinaryConflictAbsentFromOurs is the regression
+// test for a real gap: roots[0] ("ours") never had the path at all, but
+// roots[1] and roots[2] both introduce it with different blobs. The
+// conflict-detection loop used to anchor solely on idxs[0], so a path
+// missing from "ours" was never even looked at — this silently dropped
+// one side's content instead of flagging a conflict. Must still be
+// detected, keeping the first root that does have the path (roots[1]'s
+// blob) rather than whichever Materialize's union happened to pick.
+func TestComputeMergeThreeWayBinaryConflictAbsentFromOurs(t *testing.T) {
+	r := newTestRepo(t)
+
+	base, idx := recordTestPatch(t, r, nil, "keep.txt", []string{"unrelated"}, patches.Index{})
+	_ = idx
+
+	blobB, err := r.blobs.Put([]byte("content B"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobC, err := r.blobs.Put([]byte("content C"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a never touches new.png at all.
+	a, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "a", Changes: nil})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "new.png", Kind: patches.KindBlob, Blob: blobB}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "c", Changes: []patches.FileChange{{Path: "new.png", Kind: patches.KindBlob, Blob: blobC}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged, conflicts, err := computeMerge(r, a, b, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Kind != "binary" || conflicts[0].Path != "new.png" {
+		t.Fatalf("expected one binary conflict on new.png, got %v", conflicts)
+	}
+	if merged["new.png"].Blob != blobB {
+		t.Errorf("expected roots[1]'s (b's) blob kept as the first root with the path, got a different one")
+	}
+}
+
 func sameStringsHelper(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

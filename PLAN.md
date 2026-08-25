@@ -337,15 +337,10 @@ safe:
   differing target inline (a target is a short, readable string) rather
   than needing `"binary"`'s comparison-sidecar file.
 - `record.go`'s modify/delete-conflict resolution, `diffRefs`,
-  `renderDiff`, `rename.go`'s `renameCandidate`, and `log.go`'s
-  per-change summary all gained explicit symlink/executable handling —
-  each was individually a plausible place for a symlink or an
-  exec-bit-only change to either crash, get silently dropped, or render
-  wrong, not just add a case for completeness.
-- Rename detection treats a symlink exactly like a binary blob: an exact
-  target match is a detected rename; a symlink retargeted in the same
-  change it was renamed in is not (matching the "no partial similarity
-  metric for opaque content" policy blobs already had).
+  `renderDiff`, and `log.go`'s per-change summary all gained explicit
+  symlink/executable handling — each was individually a plausible place
+  for a symlink or an exec-bit-only change to either crash, get silently
+  dropped, or render wrong, not just add a case for completeness.
 
 **Two real bugs, both caught by dedicated regression tests before this
 was called done — not found by accident:**
@@ -855,6 +850,159 @@ elsewhere, so it's fixed the same way: reject outright
 (`len(b) != len(h)`) instead of silently coercing. Covered by
 `TestHashFromHexRejectsWrongLength` / `TestHashFromHexRoundTrip` in
 `objstore/patches/patch_test.go`.
+
+#### N-way `apply`/`merge` silently dropped a binary/symlink conflict when "ours" never had the path — found and fixed (2026-08-25)
+
+Found by a follow-up security audit after the run of fixes above, not
+from a user-reported bug. `computeMerge`'s binary/symlink
+conflict-detection loop (`cmd/9vcs/mergeutil.go`) anchored solely on
+`idxs[0]` ("ours"): `for p, ourSt := range idxs[0] { switch ourSt.Kind
+{ case KindBlob: ...; case KindSymlink: ... } }`. A path `idxs[0]` never
+had at all — because "ours" never touched it, not because it was
+deleted — was never even visited by this loop. If two *other* roots
+(`9vcs apply <a> <b>` where neither is "ours," or a three-way `apply`
+where only roots[1] and roots[2] introduce the path) both add the same
+path with different blob content or different symlink targets, that's
+exactly as much a real conflict as one "ours" also touched — but it
+went completely undetected: `Materialize`'s plain union just silently
+picked whichever patch applied later in deterministic topological
+order, with no error, no `CONFLICT` line, no sidecar. Directly reachable
+via `apply`'s own reason to exist (N-way, non-"ours"-anchored merges),
+which this project treats as first-class, not a rare edge case.
+
+Fixed by checking every root, not just roots[0]: for each path present
+in *any* root (not just idxs[0]), find the first root in `roots` order
+that has it as `KindBlob`/`KindSymlink` (the "anchor" — roots[0] when it
+has the path, preserving the original "ours wins" tie-break exactly;
+falling through to the next root that does have it otherwise) and check
+every later root against that anchor's value, same as before. Verified
+by `TestComputeMergeThreeWayBinaryConflictAbsentFromOurs`
+(`cmd/9vcs/mergeutil_test.go`): roots[0] never touches the path,
+roots[1] and roots[2] introduce conflicting blobs — must be flagged as
+a binary conflict and keep roots[1]'s content (the first root that has
+it), not whatever the union happened to pick. Fails against the
+pre-fix code (empty `conflicts`, silently-picked content) and passes
+against the fix.
+
+#### `topoOrder`'s ready-queue re-sort — O(n² log n) CPU-exhaustion DoS, found and fixed (2026-08-25)
+
+Also found by the same audit. `topoOrder` (`objstore/patches/replay.go`,
+underlying `Materialize`/`History`/`Closure`/`UniqueChanges`) re-sorted
+its entire `ready` queue from scratch on every pop, instead of using a
+proper priority queue — `sort.Slice(ready, ...)` inside the `for
+len(ready) > 0` loop. A normal repo has exactly one root patch, so
+`ready` starts at size 1 and this is invisible in practice. But
+`topoOrder` runs over whatever patches are transitively reachable from
+the roots passed in, and those patches can arrive from a remote peer —
+stored via `vcsfs.go`'s `writeFile.Close` (a connected client's `Twrite`
+to `/patches`) or `cmd/9vcs/sync.go`'s `import`/`reconcile` pull. Nothing
+stops an adversarial or buggy peer from constructing many
+mutually-independent (zero-`Dependencies`) patches — cheap, since any
+two just need to differ, e.g. by message — and getting them stored.
+Once k such patches are included in any later `Closure`/`Materialize`/
+`History`/`UniqueChanges` call (the served repo computing its own
+closure during `reconcile`, or a local `log`/`merge`/`checkout` after
+import), `ready` starts at ≈k and the loop pays O(k) pops each preceded
+by an O(k log k) full re-sort — O(k² log k) total, a real CPU sink for
+k in the tens of thousands. Not guarded by the connection-level
+rate-limit/conn-cap in `hardening.go`, which bounds TLS-handshake cost,
+not post-handshake decode/replay cost.
+
+Fixed with a `container/heap`-backed min-heap (`hashHeap`, ordered by
+the same byte-comparison tie-break topoOrder always used for
+reproducibility) in place of the plain slice — O(log n) per push/pop
+instead of a full re-sort, so the whole loop is O(n log n) over the
+closure size. Verified by
+`TestTopoOrderManyIndependentPatchesIsFast` (`objstore/patches/replay_test.go`):
+20,000 mutually-independent patches must return within 5s (actual: well
+under 2s with the fix; the old re-sort-per-pop approach would take far
+longer at this size) — and `TestTopoOrderDeterministicTieBreak` confirms
+the heap preserves the exact same ascending-hash tie-break ordering as
+before.
+
+#### Unbounded per-connection memory from concurrent open write-fids — found and fixed (2026-08-25)
+
+Also found by the same audit. `checkWriteSize`/`MaxObjectSize` (fixed
+earlier the same day, see "Unbounded write-offset allocation" above)
+bound a *single* fid's buffer to 1 GiB, checked against the claimed
+offset before ever allocating. But nothing bounded how many write-fids
+one connection could hold open — and buffering — *concurrently*:
+`dirFile.Create` (`vcsfs/vcsfs.go`) accepts any syntactically-valid
+64-hex-char name under `/patches`, `/blobs`, or `/offers`; verification
+only happens later, at `Close`. A client can `Tcreate` many fids in a
+row, `Twrite` close to `MaxObjectSize` into each, and simply never send
+`Tclunk` — each such buffer stays live in server memory for as long as
+the connection does. The underlying `github.com/sandgorgon/9p` v0.5.0
+server library stores fids in a plain unbounded per-connection map, with
+no fid-count cap of its own (`server/conn.go`). Reachable at the
+*weakest* trust tier this server has — `PermPropose`, via `/offers`,
+explicitly meant for lower-trust external contributors — not just
+`PermWrite`.
+
+Fixed with a connection-wide write-buffer byte budget
+(`vcsfs.writeBudget`, `vcsfs/vcsfs.go`): `Server.ConnContext`
+(`cmd/9vcs/serve.go`) attaches a fresh one to each connection's base
+context via the new `vcsfs.WithWriteBudget`, the same mechanism
+`WithPermission` already uses for per-connection identity. Every
+`writeFile`/`refFile.Write` reserves against it before growing its
+buffer (same "reject before allocating" shape as `checkWriteSize`), and
+`Close` releases its reservation regardless of whether finalizing
+succeeded. Deliberately scoped *per-connection*, not tracked
+server-wide with one shared counter: if a client disconnects without
+ever clunking its fids, the per-connection `writeBudget` struct —
+reachable only through that connection's now-dead state — becomes
+unreachable and is garbage-collected along with it, so there's no
+shared accounting that could leak upward and eventually wedge the
+server for everyone (a real risk a naive server-wide counter would have
+introduced, since nothing in the underlying library calls `Close` on a
+connection's still-open fids when it drops — confirmed by reading
+`server/conn.go`/`server.go`: no such cleanup exists there). Combined
+with `-max-conns` (default 64), total server memory from this vector is
+now bounded by roughly `maxConns × -max-conn-write-buffer` (new flag,
+default 2 GiB — headroom for one near-`MaxObjectSize` object plus some
+concurrent small writes, well under the "100 fids × ~1GiB" scenario the
+audit demonstrated). `MaxObjectSize` itself was exported (was
+`maxObjectSize`) so `serve.go` can reference it for this default without
+duplicating the magic number. Verified by
+`TestWriteBudgetRejectsExceedingConnectionTotal` (two fids, 60 bytes
+each, 100-byte connection budget — the second write must be rejected
+even though neither fid alone is anywhere near `MaxObjectSize`) and
+`TestWriteBudgetReleasedOnClose` (closing the first fid must free its
+reservation for the second).
+
+#### `MERGE_HEAD`/`MERGE_SIDECARS` writes weren't atomic or lock-protected — found and fixed (2026-08-25)
+
+Also found by the same audit. Every other ref/HEAD mutation in this
+codebase goes through `atomicWriteFile` (temp file + rename) under
+`withRefLock` (see "Ref/HEAD write atomicity and local concurrency"
+above) — but `setMergeHeads`/`setMergeSidecars`/`clearMergeHeads`/
+`clearMergeSidecars` (`cmd/9vcs/repo.go`) used plain `os.WriteFile`/
+`os.Remove`, with no lock at all. Not remotely reachable (these paths
+are local-only; `vcsfs` never touches them), but a real local-concurrency
+gap: a crash mid-write could leave a truncated `MERGE_HEAD` that
+`HashFromHex` then errors on for every subsequent command until
+manually removed, and two concurrent local invocations (`9vcs merge` in
+two terminals, or `merge` racing `apply`) could interleave their writes
+after both independently pass the "no merge in progress" check. Fixed
+by routing all four through `withRefLock`, and the two writers through
+`atomicWriteFile`, bringing them in line with every other ref/HEAD
+write. (The broader "no merge in progress" check-then-act race across
+the whole merge operation — not just these two files' writes — is a
+separate, harder problem not addressed here; see this writeup's
+reasoning for why closing it would mean holding the ref lock across a
+full replay+working-tree-write, a much bigger change than this fix's
+scope.) Verified by `TestSetMergeHeadsAndSidecarsWriteAtomically`
+(`cmd/9vcs/repo_test.go`): no leftover `.tmp` file after either writer,
+mirroring `TestAtomicWriteFileLeavesNoTempFile`'s check of the
+underlying primitive.
+
+#### Rename detection — removed (2026-08-25)
+
+See the Status section's "Rename detection" entry below for the full
+writeup: built earlier the same day (concrete scope above), then
+removed after the same audit flagged its remaining O(deleted × added)
+candidate-pair cost as not worth carrying for a purely cosmetic,
+display-time feature.
 
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
@@ -1882,37 +2030,22 @@ used to say:
   Verified live: a real binary conflict (which writes a sidecar file)
   aborted cleanly, sidecar gone, working tree back to head's own content,
   `status` reporting clean immediately after.
-- Rename detection: built and verified live, scoped deliberately as a
-  **display-time inference only** — `record` still stores a rename as a
-  plain delete of the old path plus a fresh insert under the new one,
-  byte-for-byte identical to what it stored before this feature existed.
-  No new `FileChange.Kind`, no change to the patch/graph/replay model.
-  This mirrors git's own actual behavior (no rename bit in its object
-  model either, purely a diff-time heuristic) and was the deliberate
-  choice over the alternative — a first-class move operation that
-  preserves line-graph identity across the path change, which would
-  touch `graph.go`/`linearize.go`/`replay.go`'s replay logic and merge's
-  conflict detection — a materially bigger, riskier undertaking than
-  "rename detection" was actually asking for, and not attempted here.
-  `cmd/9vcs/rename.go`'s `detectRenames` pairs a changeset's deleted
-  paths against its genuinely-new paths by content similarity (exact
-  match for binary content; for text, a symmetric overlap ratio computed
-  from the same `patches.Diff` used everywhere else in this codebase, not
-  a separate similarity algorithm — git's own 50% `-M` default reused as
-  the threshold), greedily assigning each deleted path its best match,
-  each path consumed by at most one pairing. `status` prints `R`/`R+`
-  (modified) lines for a detected pair instead of separate `D`/`A` ones;
-  `diff` (both the working-tree form and the two-ref `diffRefs` form,
-  which had to be refactored from render-immediately to
-  build-a-changes-map-first to share this) prints `renamed A -> B`, plus
-  — for a modified rename — a real diff against the old content, not the
-  insert-only ops the underlying delete+add change actually carries
-  (computed once during scoring and carried on the result so rendering
-  doesn't redo the work). Verified live: a pure rename, a rename with a
-  one-line edit (diff correctly showed only that one line, not the whole
-  file reprinted), an unrelated delete+add correctly *not* flagged as a
-  rename, and the two-ref `diffRefs` path detecting a rename made on a
-  branch relative to the branch it diverged from.
+- Rename detection: built (display-time inference only, see the
+  "Unbounded rename-detection diff cost" writeup above for how it
+  worked), then **removed (2026-08-25)** after a security-audit pass
+  flagged its remaining gap — `detectRenames` was still O(deleted ×
+  added) *candidate pairs*, each paying an unavoidable O(file size) hash
+  even after `maxRenameDiffCells` bounded the per-pair diff cost; a
+  changeset with many small deleted/added files (plausible from
+  `import`/`reconcile` of a large foreign history) meant a plain
+  `status`/`diff` could still pay a large, remotely-influenceable cost.
+  The user's call: not worth carrying the ongoing cost/complexity for a
+  purely cosmetic, display-time feature — a moved file now shows as a
+  plain `D`/`A` pair again, exactly as it was stored before this feature
+  existed and exactly as `record` always stored it regardless (this
+  removal is pure deletion of `cmd/9vcs/rename.go` and its call sites in
+  `status.go`/`diff.go` — no patch/graph/replay model ever depended on
+  it).
 
 ## Open items to revisit
 

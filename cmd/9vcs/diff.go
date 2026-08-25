@@ -50,16 +50,10 @@ func diffWorkingTree(r *repo, base patches.Hash) error {
 	return nil
 }
 
-// renderChanges is diffWorkingTree and diffRefs' shared tail: pull out
-// whatever detectRenames recognizes as a rename first, then fall back to
-// renderDiff's plain added/modified/deleted rendering for what's left.
+// renderChanges is diffWorkingTree and diffRefs' shared tail.
 func renderChanges(base patches.Index, changes map[string]patches.FileChange) {
-	renames, remaining := detectRenames(changes, base)
-	for _, rp := range renames {
-		renderRename(rp)
-	}
-	for _, p := range sortedPaths(remaining) {
-		renderDiff(p, base[p], remaining[p])
+	for _, p := range sortedPaths(changes) {
+		renderDiff(p, base[p], changes[p])
 	}
 }
 
@@ -211,35 +205,5 @@ func printModeChange(path string, wasExecutable, isExecutable bool) {
 		fmt.Printf("mode changed: %s (now executable)\n", path)
 	} else {
 		fmt.Printf("mode changed: %s (no longer executable)\n", path)
-	}
-}
-
-// renderRename prints one detectRenames pairing: a bare "renamed A -> B"
-// for an unmodified rename, or that line plus the real content diff
-// (rp.diffOps — already computed against rp.oldState during scoring, not
-// the insert-only ops the underlying delete+add changes actually carry)
-// for a rename that also changed content.
-func renderRename(rp renamePair) {
-	fmt.Printf("renamed %s -> %s\n", rp.oldPath, rp.newPath)
-	if !rp.modified {
-		return
-	}
-	if rp.newKind == patches.KindBlob {
-		fmt.Printf("Binary files %s and %s differ\n", rp.oldPath, rp.newPath)
-		return
-	}
-	baseLines := linesOf(rp.oldState)
-	baseContent := make(map[string]string, len(baseLines))
-	for _, l := range baseLines {
-		baseContent[l.ID] = l.Content
-	}
-	fmt.Printf("--- %s\n+++ %s\n", rp.oldPath, rp.newPath)
-	for _, op := range rp.diffOps {
-		switch op.Kind {
-		case patches.OpDelete:
-			fmt.Printf("-%s\n", baseContent[op.ID])
-		case patches.OpInsert:
-			fmt.Printf("+%s\n", op.Content)
-		}
 	}
 }

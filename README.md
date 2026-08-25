@@ -37,9 +37,10 @@ echo "hello" > main.go
 ```
 
 - `9vcs status` — one line per changed path: `A` (new), `M` (modified),
-  `D` (deleted), `U` (unresolved conflict), `R`/`R+` (renamed, plain or
-  with an edit — see [Renames](#renames) below). Doesn't show the diff
-  itself, just what's dirty.
+  `D` (deleted), `U` (unresolved conflict). Doesn't show the diff itself,
+  just what's dirty. A file moved with `mv` shows as a plain `D` plus
+  `A` — there's no rename tracking, matching how the underlying patch is
+  actually stored (a delete plus a fresh insert).
 - `9vcs diff` — the actual line-level diff of uncommitted changes.
   `9vcs diff <ref>` diffs against some other point; `9vcs diff <ref>
   <ref>` diffs two points directly, no working tree involved.
@@ -84,25 +85,6 @@ Restores the working tree to exactly what it was before the merge
 started (discarding any hand-editing you'd done on the conflict
 markers) and clears the merge state. Works the same whether `merge` or
 `9vcs apply` (see below) started it.
-
-### Renames
-
-`9vcs status`/`9vcs diff` detect renames automatically — no `9vcs mv`
-needed, just move the file with your normal tools (`mv`, your editor,
-whatever) and record as usual:
-
-```
-mv old_name.go new_name.go
-9vcs status                    # R  old_name.go -> new_name.go
-9vcs record -m "rename old_name.go"
-```
-
-If the content also changed, it shows as `R+` in status and `diff`
-prints the actual line-level diff against the old content (not a
-misleading "whole file added"). This is display-only, matching how git
-itself works: nothing about the underlying patch changes — it's still
-stored as a delete plus a fresh insert, just recognized and presented as
-a rename.
 
 ## Ignoring files
 

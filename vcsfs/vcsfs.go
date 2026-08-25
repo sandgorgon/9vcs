@@ -82,6 +82,83 @@ func permissionFrom(ctx context.Context) (identity.Permission, bool) {
 	return p, ok
 }
 
+type writeBudgetKey struct{}
+
+// WithWriteBudget returns a context carrying a fresh write-buffer byte
+// budget of max bytes, shared by every fid opened on one connection — a
+// Server.ConnContext hook calls this once per connection (see cmd/9vcs's
+// serve.go), mirroring WithPermission. See writeBudget's doc comment for
+// why this exists and why it's scoped per-connection rather than
+// server-wide.
+func WithWriteBudget(ctx context.Context, max int64) context.Context {
+	return context.WithValue(ctx, writeBudgetKey{}, &writeBudget{max: max})
+}
+
+func writeBudgetFrom(ctx context.Context) *writeBudget {
+	b, _ := ctx.Value(writeBudgetKey{}).(*writeBudget)
+	return b
+}
+
+// writeBudget bounds the total bytes buffered at once across every
+// writeFile/refFile fid open on one connection. MaxObjectSize (below)
+// bounds a single fid's buffer, but nothing previously bounded how many
+// fids one connection could hold open concurrently: dirFile.Create
+// doesn't require closing (Tclunk) an earlier fid before opening
+// another, so a client could Create many fids, write close to
+// MaxObjectSize into each, and simply never Close/Tclunk any of them —
+// accepted even at the weakest trust tier (PermPropose, via /offers),
+// since nothing checks a claimed hash or signature until Close. Each
+// such buffer then stayed live in server memory for as long as the
+// connection did.
+//
+// Scoped per-connection (attached to that connection's base context by
+// ConnContext, the same mechanism WithPermission already uses) rather
+// than tracked server-wide: if a client disconnects without ever
+// clunking its fids, this struct — reachable only through that
+// connection's now-dead state — becomes unreachable and is garbage
+// collected along with it, so there's no shared counter that needs an
+// explicit release hook to avoid leaking upward forever. Combined with
+// -max-conns, total server memory from this vector is bounded by
+// roughly maxConns * (this budget).
+type writeBudget struct {
+	max int64
+
+	mu   sync.Mutex
+	used int64
+}
+
+// reserve accounts for a fid's buffer growing from oldSize to newSize
+// bytes, refusing before the buffer is actually grown if that would push
+// this connection's total buffered bytes over budget — the same "reject
+// before allocating" shape checkWriteSize already uses for a single
+// fid's claimed offset. A nil budget (no ConnContext attached one, as in
+// tests that don't exercise this) is always permitted.
+func (b *writeBudget) reserve(oldSize, newSize int64) error {
+	if b == nil || newSize <= oldSize {
+		return nil
+	}
+	delta := newSize - oldSize
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.used+delta > b.max {
+		return fmt.Errorf("vcsfs: this connection has %d bytes buffered across open writes already; refusing to buffer %d more (limit %d) — close (Tclunk) finished writes first", b.used, delta, b.max)
+	}
+	b.used += delta
+	return nil
+}
+
+// release gives back size bytes once a fid's buffer is no longer held —
+// Close finalized it (successfully or not; either way the bytes stop
+// counting against this connection's budget).
+func (b *writeBudget) release(size int64) {
+	if b == nil || size == 0 {
+		return
+	}
+	b.mu.Lock()
+	b.used -= size
+	b.mu.Unlock()
+}
+
 func (fs *FS) Attach(ctx context.Context, uname, aname string) (server.File, error) {
 	perm, ok := permissionFrom(ctx)
 	if !ok {
@@ -185,7 +262,7 @@ func (d *dirFile) Walk(ctx context.Context, name string) (server.File, error) {
 		if !ok {
 			return nil, fmt.Errorf("vcsfs: ref %q not found", name)
 		}
-		return &refFile{fs: d.fs, name: name, perm: d.perm, exists: true, current: h}, nil
+		return &refFile{fs: d.fs, name: name, perm: d.perm, exists: true, current: h, budget: writeBudgetFrom(ctx)}, nil
 
 	case kindOffers:
 		h, err := patches.HashFromHex(name)
@@ -235,14 +312,14 @@ func (d *dirFile) Create(ctx context.Context, name string, mode9 p9.Mode, openMo
 		if err != nil {
 			return nil, fmt.Errorf("vcsfs: %q is not a valid hash", name)
 		}
-		return &writeFile{fs: d.fs, kind: d.kind, want: h}, nil
+		return &writeFile{fs: d.fs, kind: d.kind, want: h, budget: writeBudgetFrom(ctx)}, nil
 	case kindRefs:
 		if _, ok, err := d.fs.Refs.RefHash(name); err != nil {
 			return nil, fmt.Errorf("vcsfs: ref %s: %w", name, err)
 		} else if ok {
 			return nil, fmt.Errorf("vcsfs: ref %q already exists", name)
 		}
-		return &refFile{fs: d.fs, name: name, perm: d.perm, exists: false}, nil
+		return &refFile{fs: d.fs, name: name, perm: d.perm, exists: false, budget: writeBudgetFrom(ctx)}, nil
 	}
 	return nil, fmt.Errorf("vcsfs: %s: cannot create here", d.kind.name())
 }
@@ -376,9 +453,10 @@ func (f *objFile) Close() error { return nil }
 // content addressing means there's nothing to "undo" either way, since
 // whatever was received simply gets stored under its own real hash.
 type writeFile struct {
-	fs   *FS
-	kind dirKind // kindPatches or kindBlobs
-	want patches.Hash
+	fs     *FS
+	kind   dirKind // kindPatches or kindBlobs
+	want   patches.Hash
+	budget *writeBudget // this fid's connection-wide buffer budget; nil if none attached
 
 	mu  sync.Mutex
 	buf []byte
@@ -422,6 +500,9 @@ func (f *writeFile) Write(ctx context.Context, offset int64, p []byte) (int, err
 	defer f.mu.Unlock()
 	end := offset + int64(len(p))
 	if end > int64(len(f.buf)) {
+		if err := f.budget.reserve(int64(len(f.buf)), end); err != nil {
+			return 0, err
+		}
 		grown := make([]byte, end)
 		copy(grown, f.buf)
 		f.buf = grown
@@ -442,6 +523,7 @@ func (f *writeFile) Close() error {
 	f.mu.Lock()
 	data := f.buf
 	f.mu.Unlock()
+	f.budget.release(int64(len(data)))
 	if len(data) == 0 {
 		return nil
 	}
@@ -525,6 +607,7 @@ type refFile struct {
 	perm    identity.Permission
 	exists  bool
 	current patches.Hash
+	budget  *writeBudget // this fid's connection-wide buffer budget; nil if none attached
 
 	mu  sync.Mutex
 	buf []byte
@@ -591,6 +674,9 @@ func (f *refFile) Write(ctx context.Context, offset int64, p []byte) (int, error
 	defer f.mu.Unlock()
 	end := offset + int64(len(p))
 	if end > int64(len(f.buf)) {
+		if err := f.budget.reserve(int64(len(f.buf)), end); err != nil {
+			return 0, err
+		}
 		grown := make([]byte, end)
 		copy(grown, f.buf)
 		f.buf = grown
@@ -612,6 +698,7 @@ func (f *refFile) Close() error {
 	payload := f.buf
 	f.buf = nil
 	f.mu.Unlock()
+	f.budget.release(int64(len(payload)))
 	if len(payload) == 0 {
 		return nil
 	}
@@ -633,7 +720,7 @@ func (f *refFile) Close() error {
 	return nil
 }
 
-// maxObjectSize bounds how large a single object (a patch, blob, offer,
+// MaxObjectSize bounds how large a single object (a patch, blob, offer,
 // or ref payload) this server will attempt to buffer in memory for one
 // write — checked against the *claimed* offset+len(p) before ever
 // allocating, not against how much data was actually received.
@@ -651,20 +738,20 @@ func (f *refFile) Close() error {
 // (patches/refs are small metadata; blobs are the only case that could
 // reasonably be sizable) — a loose bound against a malicious or buggy
 // offset claim, not a considered product policy on maximum file size.
-const maxObjectSize = 1 << 30 // 1 GiB
+const MaxObjectSize = 1 << 30 // 1 GiB
 
 // checkWriteSize rejects a write before its caller ever attempts to grow
 // a buffer to fit it: a negative offset (reachable when a peer sends an
 // unsigned 9P offset large enough to wrap into a negative int64, which
 // would otherwise panic on the later slice expression buf[offset:]) or
-// an offset+len(p) beyond maxObjectSize.
+// an offset+len(p) beyond MaxObjectSize.
 func checkWriteSize(offset int64, p []byte) error {
 	if offset < 0 {
 		return fmt.Errorf("vcsfs: negative write offset %d", offset)
 	}
 	end := offset + int64(len(p))
-	if end > maxObjectSize {
-		return fmt.Errorf("vcsfs: write would grow this object to %d bytes, over the %d-byte limit", end, maxObjectSize)
+	if end > MaxObjectSize {
+		return fmt.Errorf("vcsfs: write would grow this object to %d bytes, over the %d-byte limit", end, MaxObjectSize)
 	}
 	return nil
 }

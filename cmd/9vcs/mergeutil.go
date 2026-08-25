@@ -78,26 +78,51 @@ func computeMerge(r *repo, roots ...patches.Hash) (patches.Index, []mergeConflic
 	// Binary and symlink conflicts: more than one distinct value among
 	// roots for the same atomic (non-line-graph) path — a whole-file
 	// blob or a symlink target, neither of which has a line-level merge
-	// that makes sense. roots[0] ("ours") wins the kept content, same
-	// keep-a-side policy the two-way version always used.
-	for p, ourSt := range idxs[0] {
-		switch ourSt.Kind {
+	// that makes sense. Checked across every root that has the path, not
+	// just roots[0] ("ours") — a path only roots[1] and roots[2] both
+	// introduce, with different content, is exactly as much a conflict
+	// as one "ours" also touched; anchoring solely on idxs[0] silently
+	// missed it (Materialize's union just picked whichever patch applied
+	// later in topological order, with no error). The kept content is
+	// whichever root comes first in roots order that has the path at
+	// all — preserves the original two-way "ours wins" policy as the
+	// case where roots[0] does have it, and falls through to the next
+	// root when it doesn't.
+	allPaths := map[string]bool{}
+	for _, idx := range idxs {
+		for p := range idx {
+			allPaths[p] = true
+		}
+	}
+	for p := range allPaths {
+		anchor := -1
+		for i, idx := range idxs {
+			if st, ok := idx[p]; ok && (st.Kind == patches.KindBlob || st.Kind == patches.KindSymlink) {
+				anchor = i
+				break
+			}
+		}
+		if anchor == -1 {
+			continue
+		}
+		anchorSt := idxs[anchor][p]
+		switch anchorSt.Kind {
 		case patches.KindBlob:
 			conflicted := false
-			for i := 1; i < len(idxs); i++ {
-				if st, ok := idxs[i][p]; ok && st.Kind == patches.KindBlob && st.Blob != ourSt.Blob {
+			for i := anchor + 1; i < len(idxs); i++ {
+				if st, ok := idxs[i][p]; ok && st.Kind == patches.KindBlob && st.Blob != anchorSt.Blob {
 					conflicted = true
 				}
 			}
 			if conflicted {
 				add(mergeConflict{Path: p, Kind: "binary"})
-				merged[p] = ourSt
+				merged[p] = anchorSt
 			}
 		case patches.KindSymlink:
 			seen := map[string]bool{}
 			var others []string
-			for i := 1; i < len(idxs); i++ {
-				if st, ok := idxs[i][p]; ok && st.Kind == patches.KindSymlink && st.SymlinkTarget != ourSt.SymlinkTarget && !seen[st.SymlinkTarget] {
+			for i := anchor + 1; i < len(idxs); i++ {
+				if st, ok := idxs[i][p]; ok && st.Kind == patches.KindSymlink && st.SymlinkTarget != anchorSt.SymlinkTarget && !seen[st.SymlinkTarget] {
 					seen[st.SymlinkTarget] = true
 					others = append(others, st.SymlinkTarget)
 				}
@@ -105,7 +130,7 @@ func computeMerge(r *repo, roots ...patches.Hash) (patches.Index, []mergeConflic
 			if len(others) > 0 {
 				sort.Strings(others)
 				add(mergeConflict{Path: p, Kind: "symlink", OtherTargets: others})
-				merged[p] = ourSt
+				merged[p] = anchorSt
 			}
 		}
 	}
