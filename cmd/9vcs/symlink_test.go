@@ -207,6 +207,60 @@ func TestWriteWorkingTreeReplacesSymlinkWithRegularFile(t *testing.T) {
 	}
 }
 
+// TestWriteWorkingTreeRefusesSymlinkPathEscape is the regression test
+// for a real, live-proven vulnerability distinct from (and not caught
+// by) validPath's ".."-string rejection: a change at "evil" (a symlink
+// pointing outside the repo) plus a second change at
+// "evil/nested/proof.txt" — a perfectly canonical path string with no
+// ".." anywhere — caused a plain os.MkdirAll/os.WriteFile to follow the
+// symlink at the OS level and write completely outside the repo,
+// confirmed live before writeWorkingTree was rewritten to use os.Root.
+func TestWriteWorkingTreeRefusesSymlinkPathEscape(t *testing.T) {
+	r := newTestRepo(t)
+	outside := t.TempDir() // must never receive anything
+
+	p := &patches.Patch{Message: "malicious", Changes: []patches.FileChange{
+		{Path: "evil", Kind: patches.KindSymlink, SymlinkTarget: outside},
+		{Path: "evil/nested/proof.txt", Kind: patches.KindText, TrailingNewline: true,
+			Ops: []patches.LineOp{{Kind: patches.OpInsert, ID: "a", Content: "pwned"}}},
+	}}
+	h, err := r.store.Put(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := r.materialize(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeWorkingTree(r, patches.Index{}, idx); err == nil {
+		t.Fatal("expected writeWorkingTree to refuse a write escaping through a symlink component, got nil")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "nested", "proof.txt")); !os.IsNotExist(err) {
+		t.Errorf("proof.txt must not exist outside the repo; stat err = %v", err)
+	}
+}
+
+// TestWriteWorkingTreeAllowsAbsoluteTargetLeafSymlink confirms the fix
+// doesn't regress the legitimate case it has to keep working: a symlink
+// whose target happens to be an absolute path, but which nothing else
+// ever uses as an intermediate path component — os.Root only refuses
+// *walking through* an absolute-target symlink, not *creating* one.
+func TestWriteWorkingTreeAllowsAbsoluteTargetLeafSymlink(t *testing.T) {
+	r := newTestRepo(t)
+	new := patches.Index{"bin/env": {Kind: patches.KindSymlink, SymlinkTarget: "/usr/bin/env"}}
+	if err := writeWorkingTree(r, patches.Index{}, new); err != nil {
+		t.Fatalf("a leaf symlink with an absolute target should be allowed: %v", err)
+	}
+	got, err := os.Readlink(filepath.Join(r.root, "bin", "env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/usr/bin/env" {
+		t.Errorf("target = %q, want %q", got, "/usr/bin/env")
+	}
+}
+
 // TestComputeMergeThreeWaySymlinkConflict mirrors
 // TestComputeMergeThreeWayBinaryConflict's shape exactly — same
 // keep-roots[0], flag-the-rest policy, generalized to symlink targets.

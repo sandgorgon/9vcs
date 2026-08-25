@@ -91,12 +91,28 @@ func cmdRecord(args []string) error {
 	// tree, right now) happens to show. A fresh full insert is the only
 	// form that's correct regardless of that tiebreak — it doesn't
 	// depend on which graph object survived replay to diff against.
+	// Reads go through an os.Root confined to r.root, not a plain
+	// filepath.Join + bare os.* call — same reasoning as
+	// writeWorkingTree's rewrite (see its doc comment): c.Path is
+	// already a validated string (no ".."), but what it actually
+	// resolves to *on disk* could still traverse through an
+	// intermediate symlink component if one happens to be sitting in
+	// the working tree, and this is the one other place in this
+	// codebase that reads working-tree content by path outside
+	// changedFiles (which is safe by construction — see
+	// workingtree.go's changedFiles doc comment).
+	workRoot, err := os.OpenRoot(r.root)
+	if err != nil {
+		return fmt.Errorf("opening working tree root: %w", err)
+	}
+	defer workRoot.Close()
+
 	for _, c := range mergeConflicts {
 		if c.Kind != "modify/delete" {
 			continue
 		}
-		full := filepath.Join(r.root, filepath.FromSlash(c.Path))
-		info, err := os.Lstat(full)
+		rel := filepath.FromSlash(c.Path)
+		info, err := workRoot.Lstat(rel)
 		if os.IsNotExist(err) {
 			continue // honoring the deletion; changedFiles' KindDelete already covers it
 		}
@@ -104,7 +120,7 @@ func cmdRecord(args []string) error {
 			return fmt.Errorf("reading %s: %w", c.Path, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(full)
+			target, err := workRoot.Readlink(rel)
 			if err != nil {
 				return fmt.Errorf("reading symlink %s: %w", c.Path, err)
 			}
@@ -112,7 +128,7 @@ func cmdRecord(args []string) error {
 			continue
 		}
 		executable := info.Mode()&0o111 != 0
-		content, err := os.ReadFile(full)
+		content, err := workRoot.ReadFile(rel)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", c.Path, err)
 		}

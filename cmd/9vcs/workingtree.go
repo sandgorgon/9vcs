@@ -248,32 +248,57 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 // in old but absent from new (i.e. deleted between the two points). A
 // KindText path with unresolved forks is written with inline conflict
 // markers — the presented rendering, not a resolved one.
+//
+// Every file operation goes through an os.Root rooted at r.root, not a
+// plain filepath.Join followed by a bare os.* call — a real,
+// live-proven vulnerability otherwise: a tracked symlink used as an
+// *intermediate* path component (e.g. a change at "evil" — a symlink
+// pointing outside the repo — plus a second change at
+// "evil/nested/file.txt") causes a plain os.MkdirAll/os.WriteFile to
+// follow the symlink at the OS level and write completely outside the
+// repo, escaping the earlier fix for literal ".."-style paths entirely
+// (the path string "evil/nested/file.txt" is perfectly canonical — the
+// escape happens via what's *already sitting on disk*, not via the
+// string). os.Root confines every operation to stay under r.root: it
+// follows a symlink that stays within the root, but refuses one that
+// would leave it (and refuses an absolute-target symlink as an
+// intermediate component outright) — while still allowing an absolute
+// target to be *created* as a leaf symlink (creating one doesn't need
+// to resolve where it points), so a legitimate case like
+// "bin/env -> /usr/bin/env" keeps working. See PLAN.md's "Symlink path
+// traversal via an intermediate component" for the full writeup.
 func writeWorkingTree(r *repo, old, new patches.Index) error {
+	root, err := os.OpenRoot(r.root)
+	if err != nil {
+		return fmt.Errorf("opening working tree root: %w", err)
+	}
+	defer root.Close()
+
 	for p, st := range new {
-		full := filepath.Join(r.root, filepath.FromSlash(p))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		rel := filepath.FromSlash(p)
+		if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
 			return err
 		}
 
 		if st.Kind == patches.KindSymlink {
-			// A plain os.Symlink would fail outright if a regular file
-			// (or a stale symlink to something else) already sits here —
+			// A plain Symlink would fail outright if a regular file (or
+			// a stale symlink to something else) already sits here —
 			// clear it first. ENOENT (nothing there yet) is fine.
-			if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+			if err := root.Remove(rel); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("clearing %s before creating symlink: %w", p, err)
 			}
-			if err := os.Symlink(st.SymlinkTarget, full); err != nil {
+			if err := root.Symlink(st.SymlinkTarget, rel); err != nil {
 				return fmt.Errorf("creating symlink %s: %w", p, err)
 			}
 			continue
 		}
 		// If a symlink currently occupies this path and the new content
-		// isn't itself a symlink, remove it first — os.WriteFile would
-		// otherwise follow it and clobber whatever it points to, quite
-		// possibly outside the repo entirely, instead of replacing the
-		// tracked path.
-		if fi, err := os.Lstat(full); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			if err := os.Remove(full); err != nil {
+		// isn't itself a symlink, remove it first — WriteFile would
+		// otherwise follow it (if it resolves within the root at all;
+		// os.Root refuses it outright if not) and clobber whatever it
+		// points to, instead of replacing the tracked path.
+		if fi, err := root.Lstat(rel); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			if err := root.Remove(rel); err != nil {
 				return fmt.Errorf("removing stale symlink at %s: %w", p, err)
 			}
 		}
@@ -294,16 +319,16 @@ func writeWorkingTree(r *repo, old, new patches.Index) error {
 		if st.Executable {
 			mode = 0o755
 		}
-		if err := os.WriteFile(full, content, mode); err != nil {
+		if err := root.WriteFile(rel, content, mode); err != nil {
 			return err
 		}
-		// os.WriteFile's mode argument only applies when it actually
+		// WriteFile's mode argument only applies when it actually
 		// creates the file — POSIX open(2) leaves an existing file's
 		// permission bits untouched even with O_CREAT — so an existing
 		// path (the common case: checkout overwriting what's already
 		// there) needs an explicit chmod or a toggled executable bit
 		// would silently fail to take effect.
-		if err := os.Chmod(full, mode); err != nil {
+		if err := root.Chmod(rel, mode); err != nil {
 			return fmt.Errorf("setting mode for %s: %w", p, err)
 		}
 	}
@@ -311,8 +336,7 @@ func writeWorkingTree(r *repo, old, new patches.Index) error {
 		if _, ok := new[p]; ok {
 			continue
 		}
-		full := filepath.Join(r.root, filepath.FromSlash(p))
-		if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		if err := root.Remove(filepath.FromSlash(p)); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
