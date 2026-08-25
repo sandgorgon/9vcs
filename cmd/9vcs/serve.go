@@ -65,7 +65,7 @@ func cmdServe(args []string) error {
 	// existed, per-connection identity no longer needs its own FS
 	// instance — it flows through the request context instead (see
 	// ConnContext below and vcsfs.WithPermission).
-	fsys := &vcsfs.FS{Store: r.store, Blobs: r.blobs, Refs: refAdapter{r}}
+	fsys := &vcsfs.FS{Store: r.store, Blobs: r.blobs, Refs: refAdapter{r}, Offers: r.offers}
 	srv := &server.Server{
 		FS: fsys,
 		// Pinned explicitly rather than left at the zero value: Msize

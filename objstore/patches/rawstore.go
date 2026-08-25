@@ -67,6 +67,53 @@ func (s *rawStore) has(h Hash) bool {
 	return err == nil
 }
 
+// remove deletes the object stored under h, if present. A no-op, not an
+// error, if h was never stored — mirrors os.Remove's ErrNotExist being
+// swallowed elsewhere in this package (see openRaw's missing-dir handling
+// in spirit): the caller only ever wants "make sure this is gone."
+func (s *rawStore) remove(h Hash) error {
+	err := os.Remove(s.path(h))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+// list returns every hash currently stored, in no particular order. Not
+// needed by patches/blobs (content-addressed pull only ever fetches a
+// hash it already knows — see vcsfs's dirFile doc comment), but offers
+// need real enumeration since browsing the pending queue is the point.
+func (s *rawStore) list() ([]Hash, error) {
+	fanouts, err := os.ReadDir(s.dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []Hash
+	for _, fanout := range fanouts {
+		if !fanout.IsDir() {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(s.dir, fanout.Name()))
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".tmp") {
+				continue
+			}
+			h, err := HashFromHex(fanout.Name() + e.Name())
+			if err != nil {
+				continue // not one of ours; skip rather than fail the whole listing
+			}
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
 // resolvePrefix finds the unique stored hash starting with prefix (hex,
 // case-insensitive). A full 64-char hex string is returned as-is without
 // touching disk; otherwise prefix must be at least 4 hex characters, which

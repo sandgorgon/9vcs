@@ -3,7 +3,12 @@
 // immutable once written, but a peer with write permission may create new
 // ones — content addressing means a create either matches its claimed hash
 // or is rejected, never silently overwrites), and /refs/<name> (the one
-// mutable path, CAS-protected on write — see refFile).
+// mutable path, CAS-protected on write — see refFile). /offers/<hash> is a
+// third content-addressed region, present only when FS.Offers is set: each
+// entry is a signed patch bundle (see the bundle package) accepted with a
+// narrower PermPropose permission, and — unlike patches/blobs — genuinely
+// removable, by a PermWrite peer, since a pending offer is transient rather
+// than permanent history.
 package vcsfs
 
 import (
@@ -18,6 +23,7 @@ import (
 	p9 "github.com/sandgorgon/9p"
 	"github.com/sandgorgon/9p/server"
 
+	"github.com/sandgorgon/9vcs/bundle"
 	"github.com/sandgorgon/9vcs/identity"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
@@ -56,9 +62,10 @@ type RefStore interface {
 // deviation" for why per-connection identity has to flow through the
 // context this way rather than through FS itself.
 type FS struct {
-	Store *patches.Store
-	Blobs *patches.BlobStore
-	Refs  RefStore
+	Store  *patches.Store
+	Blobs  *patches.BlobStore
+	Refs   RefStore
+	Offers *patches.BlobStore // may be nil; see dirFile.Walk's kindRoot case
 }
 
 type permKey struct{}
@@ -90,6 +97,7 @@ const (
 	kindPatches
 	kindBlobs
 	kindRefs
+	kindOffers
 )
 
 func (k dirKind) name() string {
@@ -100,6 +108,8 @@ func (k dirKind) name() string {
 		return "blobs"
 	case kindRefs:
 		return "refs"
+	case kindOffers:
+		return "offers"
 	default:
 		return ""
 	}
@@ -137,6 +147,11 @@ func (d *dirFile) Walk(ctx context.Context, name string) (server.File, error) {
 			return &dirFile{fs: d.fs, kind: kindBlobs, perm: d.perm}, nil
 		case "refs":
 			return &dirFile{fs: d.fs, kind: kindRefs, perm: d.perm}, nil
+		case "offers":
+			if d.fs.Offers == nil {
+				return nil, fmt.Errorf("vcsfs: no such file %q", name)
+			}
+			return &dirFile{fs: d.fs, kind: kindOffers, perm: d.perm}, nil
 		}
 		return nil, fmt.Errorf("vcsfs: no such file %q", name)
 
@@ -149,7 +164,7 @@ func (d *dirFile) Walk(ctx context.Context, name string) (server.File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("vcsfs: patch %s: %w", name, err)
 		}
-		return &objFile{name: name, data: data, perm: d.perm}, nil
+		return &objFile{fs: d.fs, kind: kindPatches, name: name, data: data, perm: d.perm}, nil
 
 	case kindBlobs:
 		h, err := patches.HashFromHex(name)
@@ -160,7 +175,7 @@ func (d *dirFile) Walk(ctx context.Context, name string) (server.File, error) {
 		if err != nil {
 			return nil, fmt.Errorf("vcsfs: blob %s: %w", name, err)
 		}
-		return &objFile{name: name, data: data, perm: d.perm}, nil
+		return &objFile{fs: d.fs, kind: kindBlobs, name: name, data: data, perm: d.perm}, nil
 
 	case kindRefs:
 		h, ok, err := d.fs.Refs.RefHash(name)
@@ -171,6 +186,17 @@ func (d *dirFile) Walk(ctx context.Context, name string) (server.File, error) {
 			return nil, fmt.Errorf("vcsfs: ref %q not found", name)
 		}
 		return &refFile{fs: d.fs, name: name, perm: d.perm, exists: true, current: h}, nil
+
+	case kindOffers:
+		h, err := patches.HashFromHex(name)
+		if err != nil {
+			return nil, fmt.Errorf("vcsfs: %q is not a valid offer id", name)
+		}
+		data, err := d.fs.Offers.Get(h)
+		if err != nil {
+			return nil, fmt.Errorf("vcsfs: offer %s: %w", name, err)
+		}
+		return &objFile{fs: d.fs, kind: kindOffers, name: name, data: data, perm: d.perm}, nil
 	}
 	return nil, fmt.Errorf("vcsfs: no such file %q", name)
 }
@@ -188,12 +214,23 @@ func (d *dirFile) Open(ctx context.Context, mode p9.Mode) error {
 // already exists is never legitimately "created" again; a ref that
 // already exists is updated via Walk + Open(OWRITE) instead, matching
 // normal 9P Tcreate semantics — see refFile).
+// minCreatePermission is the permission each dirKind requires to Create
+// under it. Offers accept the narrower PermPropose — the whole reason
+// that tier exists (see identity.PermPropose's doc comment) — everything
+// else still requires PermWrite.
+func minCreatePermission(k dirKind) identity.Permission {
+	if k == kindOffers {
+		return identity.PermPropose
+	}
+	return identity.PermWrite
+}
+
 func (d *dirFile) Create(ctx context.Context, name string, mode9 p9.Mode, openMode p9.Mode) (server.File, error) {
-	if d.perm < identity.PermWrite {
+	if d.perm < minCreatePermission(d.kind) {
 		return nil, fmt.Errorf("vcsfs: %s: permission denied", d.kind.name())
 	}
 	switch d.kind {
-	case kindPatches, kindBlobs:
+	case kindPatches, kindBlobs, kindOffers:
 		h, err := patches.HashFromHex(name)
 		if err != nil {
 			return nil, fmt.Errorf("vcsfs: %q is not a valid hash", name)
@@ -222,11 +259,23 @@ func (d *dirFile) Read(ctx context.Context, offset int64, p []byte) (int, error)
 	switch d.kind {
 	case kindRoot:
 		names = []string{"patches", "blobs", "refs"}
+		if d.fs.Offers != nil {
+			names = append(names, "offers")
+		}
 	case kindRefs:
 		var err error
 		names, err = d.fs.Refs.ListRefs()
 		if err != nil {
 			return 0, err
+		}
+	case kindOffers:
+		hashes, err := d.fs.Offers.List()
+		if err != nil {
+			return 0, err
+		}
+		names = make([]string, len(hashes))
+		for i, h := range hashes {
+			names[i] = h.String()
 		}
 	}
 	entries := make([]p9.Stat, len(names))
@@ -251,6 +300,8 @@ func (d *dirFile) Close() error { return nil }
 // here is small enough that eager loading is simpler than a lazy Open-time
 // fetch, not a performance concern worth the extra state.
 type objFile struct {
+	fs   *FS
+	kind dirKind // kindPatches, kindBlobs, or kindOffers
 	name string
 	data []byte
 	perm identity.Permission
@@ -294,8 +345,22 @@ func (f *objFile) Write(ctx context.Context, offset int64, p []byte) (int, error
 	return 0, fmt.Errorf("vcsfs: %s is read-only", f.name)
 }
 
+// Remove is permanently refused for patches and blobs — every other
+// content-addressed object in this design is immutable and durable on
+// disk. Offers are the one exception: they're inherently transient
+// (pending review), so a maintainer (PermWrite) can clear a handled one.
 func (f *objFile) Remove(ctx context.Context) error {
-	return fmt.Errorf("vcsfs: %s is read-only", f.name)
+	if f.kind != kindOffers {
+		return fmt.Errorf("vcsfs: %s is read-only", f.name)
+	}
+	if f.perm < identity.PermWrite {
+		return fmt.Errorf("vcsfs: offers/%s: permission denied", f.name)
+	}
+	h, err := patches.HashFromHex(f.name)
+	if err != nil {
+		return fmt.Errorf("vcsfs: offers/%s: %w", f.name, err)
+	}
+	return f.fs.Offers.Remove(h)
 }
 
 func (f *objFile) Close() error { return nil }
@@ -382,6 +447,32 @@ func (f *writeFile) Close() error {
 		got, err := f.fs.Blobs.Put(data)
 		if err != nil {
 			return fmt.Errorf("vcsfs: storing blob: %w", err)
+		}
+		if got != f.want {
+			return fmt.Errorf("vcsfs: written content hashes to %s, not the requested %s", got, f.want)
+		}
+		return nil
+	case kindOffers:
+		// An offer is a bundle sitting in a mailbox — reuse bundle.Decode
+		// and Verify exactly as bundle import/show already do. What's
+		// deliberately not checked here: each inner patch's own
+		// AuthorFingerprint/AuthorSignature — that's Bundle.Store's job,
+		// which only runs later when the maintainer actually calls
+		// `offer apply`. An offer sitting in the queue is inspectable,
+		// not yet trusted at the per-patch level; only the bundle's own
+		// signer signature is verified before it's even allowed into the
+		// queue at all, so a garbage or unverifiable offer never sits
+		// there.
+		b, err := bundle.Decode(data)
+		if err != nil {
+			return fmt.Errorf("vcsfs: invalid offer content: %w", err)
+		}
+		if !b.Verify() {
+			return fmt.Errorf("vcsfs: offer has an invalid signature — corrupted or tampered with")
+		}
+		got, err := f.fs.Offers.Put(data)
+		if err != nil {
+			return fmt.Errorf("vcsfs: storing offer: %w", err)
 		}
 		if got != f.want {
 			return fmt.Errorf("vcsfs: written content hashes to %s, not the requested %s", got, f.want)

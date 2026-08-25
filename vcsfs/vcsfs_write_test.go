@@ -3,6 +3,7 @@ package vcsfs
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"io"
 	"net"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/sandgorgon/9p/client"
 	"github.com/sandgorgon/9p/server"
 
+	"github.com/sandgorgon/9vcs/bundle"
 	"github.com/sandgorgon/9vcs/identity"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
@@ -348,6 +350,232 @@ func TestCloseErrorsPropagateThroughDispatch(t *testing.T) {
 	}
 	if err := f.Close(); err == nil {
 		t.Fatal("expected Close to report the hash mismatch as an error, got nil")
+	}
+}
+
+// newTestFSWithOffers is newTestFS plus an Offers store — kept separate
+// from newTestFS (which leaves Offers nil) so the nil case stays
+// independently tested: an FS with no Offers store behaves exactly as it
+// did before this feature existed (see TestOffersAbsentWhenNil).
+func newTestFSWithOffers(t *testing.T) (*FS, fakeRefs) {
+	t.Helper()
+	fs, refs := newTestFS(t)
+	dir := t.TempDir()
+	offers, err := patches.OpenBlobs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.Offers = offers
+	return fs, refs
+}
+
+// newSignedBundle builds valid, verifiably-signed bundle bytes containing
+// one throwaway patch — enough for offer tests, which only need bytes
+// that satisfy bundle.Decode + Bundle.Verify, not a bundle with any
+// particular content.
+func newSignedBundle(t *testing.T) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := patches.Open(dir + "/patches")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs, err := patches.OpenBlobs(dir + "/blobs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := store.Put(&patches.Patch{Message: "offer content"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _, err := bundle.Export(store, blobs, []patches.Hash{h}, "an offer", priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestOfferPostRoundTrip(t *testing.T) {
+	fs, _ := newTestFSWithOffers(t)
+	c := dialWith(t, fs, identity.PermPropose)
+
+	data := newSignedBundle(t)
+	id := patches.Hash(sha256.Sum256(data))
+
+	f, err := c.Create("offers/"+id.String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close (finalize): %v", err)
+	}
+
+	if !fs.Offers.Has(id) {
+		t.Error("offer not present in the offers store after a successful post")
+	}
+
+	rf, err := c.Open("offers/"+id.String(), p9.OREAD)
+	if err != nil {
+		t.Fatalf("Open for read: %v", err)
+	}
+	got, err := io.ReadAll(rf)
+	rf.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) {
+		t.Errorf("read back %d bytes, want %d bytes matching what was posted", len(got), len(data))
+	}
+}
+
+// TestOfferPostRequiresProposePermission: a peer with only PermRead can't
+// post — PermPropose is the minimum, one tier narrower than PermWrite
+// everything else under Create requires.
+func TestOfferPostRequiresProposePermission(t *testing.T) {
+	fs, _ := newTestFSWithOffers(t)
+	c := dialWith(t, fs, identity.PermRead)
+
+	data := newSignedBundle(t)
+	id := patches.Hash(sha256.Sum256(data))
+	if _, err := c.Create("offers/"+id.String(), 0o644, p9.OWRITE); err == nil {
+		t.Error("expected permission denied for a read-only peer posting an offer, got nil")
+	}
+}
+
+// TestOfferPostInvalidSignatureRejected: an offer whose own bundle
+// signature doesn't verify — garbage, or tampered after signing — must
+// be refused outright, never reaching the offers store at all. This is a
+// different check from each inner patch's own AuthorFingerprint/
+// AuthorSignature (deliberately deferred to Bundle.Store at `offer
+// apply` time, not checked here) — this one is about the bundle itself
+// being trustworthy enough to sit in the queue.
+func TestOfferPostInvalidSignatureRejected(t *testing.T) {
+	fs, _ := newTestFSWithOffers(t)
+	c := dialWith(t, fs, identity.PermPropose)
+
+	data := newSignedBundle(t)
+	tampered := append([]byte(nil), data...)
+	tampered[len(tampered)-1] ^= 0xFF // corrupt the last payload byte, signature no longer verifies
+	id := patches.Hash(sha256.Sum256(tampered))
+
+	f, err := c.Create("offers/"+id.String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write(tampered); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := f.Close(); err == nil {
+		t.Fatal("expected Close to report the invalid bundle signature, got nil")
+	}
+	if fs.Offers.Has(id) {
+		t.Error("an offer with an invalid signature must not be stored")
+	}
+}
+
+func TestOfferListing(t *testing.T) {
+	fs, _ := newTestFSWithOffers(t)
+	data1 := newSignedBundle(t)
+	data2 := newSignedBundle(t)
+	id1, err := fs.Offers.Put(data1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := fs.Offers.Put(data2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := dialWith(t, fs, identity.PermRead)
+	f, err := c.Open("offers", p9.OREAD)
+	if err != nil {
+		t.Fatalf("Open offers dir: %v", err)
+	}
+	defer f.Close()
+	stats, err := f.ReadDir()
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("got %d entries, want 2", len(stats))
+	}
+	seen := map[string]bool{}
+	for _, st := range stats {
+		seen[st.Name] = true
+	}
+	if !seen[id1.String()] || !seen[id2.String()] {
+		t.Errorf("offer listing = %v, want both %s and %s", seen, id1, id2)
+	}
+}
+
+// TestOffersAbsentWhenNil: an FS with no Offers store (the zero value,
+// exactly what every FS built before this feature existed already looks
+// like) behaves as if /offers doesn't exist at all — no panic, no
+// special-cased error, just an ordinary "no such file."
+func TestOffersAbsentWhenNil(t *testing.T) {
+	fs, _ := newTestFS(t) // Offers left nil
+	c := dialWith(t, fs, identity.PermRead)
+
+	if _, err := c.Open("offers", p9.OREAD); err == nil {
+		t.Error("expected opening /offers to fail when FS.Offers is nil, got nil")
+	}
+}
+
+func TestOfferRemoveRequiresWritePermission(t *testing.T) {
+	fs, _ := newTestFSWithOffers(t)
+	data := newSignedBundle(t)
+	id, err := fs.Offers.Put(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// PermPropose can post but not remove — remove needs PermWrite.
+	c := dialWith(t, fs, identity.PermPropose)
+	root, err := c.Attach("test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offerFid, err := root.Walk("offers", id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := offerFid.Remove(); err == nil {
+		t.Error("expected Remove to be refused for a propose-only peer, got nil")
+	}
+	if !fs.Offers.Has(id) {
+		t.Error("offer should still be present after a refused Remove")
+	}
+}
+
+func TestOfferRemove(t *testing.T) {
+	fs, _ := newTestFSWithOffers(t)
+	data := newSignedBundle(t)
+	id, err := fs.Offers.Put(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := dialWith(t, fs, identity.PermWrite)
+	root, err := c.Attach("test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	offerFid, err := root.Walk("offers", id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := offerFid.Remove(); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if fs.Offers.Has(id) {
+		t.Error("offer should be gone after a successful Remove")
 	}
 }
 

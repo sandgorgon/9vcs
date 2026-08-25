@@ -43,6 +43,8 @@ func main() {
 		err = cmdBundle(os.Args[2:])
 	case "apply":
 		err = cmdApply(os.Args[2:])
+	case "offer":
+		err = cmdOffer(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -86,6 +88,13 @@ commands:
                                touches no ref — review with diff/merge before it's integrated
   apply <patch-hash-or-ref>... integrate one or more specific patches into the current branch
                                in a single merge (merge's N-way sibling) — run record to finish
+  offer [-m MSG] <addr> <ref-or-hash>...
+                               post a signed bundle to a live peer's /offers (needs propose
+                               permission there) — flags before the addr/ref-or-hash arguments
+  offer list <addr>            show a peer's pending offers: signer, message, patch count
+  offer apply <addr> <id>      fetch + verify + store one offer locally (needs write permission
+                               on the peer); touches no ref — review, then run 9vcs apply <hash>
+  offer remove <addr> <id>     clear a handled offer from a peer's queue (needs write permission)
 
 -peer-fingerprint pins the expected peer explicitly for one call; omit it to use
 this install's known-peers store instead (~/.config/9vcs/known-peers on Linux),

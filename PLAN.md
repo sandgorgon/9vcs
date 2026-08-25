@@ -619,6 +619,196 @@ actually needs, so it's left for later rather than bundled in here.
 purely on patch hashes already present in the local store, however they
 got there (`bundle import`, `reconcile`, or a plain `record`).
 
+#### `/offers` live variant — concrete scope (2026-08-24, not yet built)
+
+**The workflow this is for**, confirmed with the user before scoping the
+rest: a small trusted team, membership managed entirely by the person
+running `serve` (the "owner"). Onboarding a new member needs no new
+mechanism — it's exactly decision #7's existing `authorized-peers` file:
+the new member runs `9vcs identity show` to get their fingerprint, hands
+it to the owner out of band (however a small trusted team already talks),
+and the owner appends one line, `<fingerprint> propose`. Revocation is
+the same file, minus a line. `PermPropose` (`identity/authorized.go`) has
+sat unused since decision #7 specifically for this — its doc comment
+already says "not load-bearing yet... included now so the
+authorized-peers file format doesn't need a breaking change once there
+is." This is that day.
+
+What offers add over the primary bundle mechanism (decision #8's
+export/import, already built): bundle export/import assumes the sender
+and the maintainer are *not* both online at once — the file goes over
+email/chat/USB, no server needed. Offers are for when the maintainer's
+`9vcs serve` **is** reachable right now, and the question is whether a
+`propose`-permission peer (no `write`, so no way to move `/refs`
+themselves) has to leave the tool to submit something. Without offers,
+they'd `bundle export` to a file and hand it over some entirely separate
+channel, even though they already hold a live, TLS-authenticated
+connection to the maintainer's server the moment they can reach it at
+all. Offers close that gap: same connection, same already-established
+identity, the bundle lands in a place *on the maintainer's own server*
+instead of being routed around it.
+
+**An offer is a bundle sitting in a mailbox — literally.** No new wire
+format, no new crypto. `bundle.Export`/`Decode`/`Verify`/`Store`
+(decision #8, already built) are reused as-is; the only thing that
+changes is where the resulting bytes go. This keeps the new code surface
+small: a storage location, one new `vcsfs` region, and three CLI verbs.
+
+**Storage: no new type.** An offer is exactly the same shape as a blob —
+raw bytes, content-addressed, no structure the store itself needs to
+understand — so `patches.BlobStore` is reused directly rather than
+inventing an `OfferStore`. `(*repo)` gains `offers *patches.BlobStore`,
+opened via `patches.OpenBlobs(filepath.Join(dir, "offers"))` alongside
+the existing `store`/`blobs` opens in `findRepo()`/`initRepo()`
+(`.9vcs/offers`, same on-disk fan-out layout `.9vcs/blobs` already uses).
+
+Two small additions to `objstore/patches` are needed, since `BlobStore`
+today only exposes `Put`/`Get`/`Has`:
+- **`rawStore.list()` / `BlobStore.List() ([]Hash, error)`**: walks the
+  two-level fan-out directory and returns every stored hash. Nothing
+  needs this today — `dirFile`'s doc comment in `vcsfs.go` is explicit
+  that `/patches` and `/blobs` deliberately don't support enumeration,
+  since content-addressed pull only ever fetches a hash it already knows.
+  Offers are the opposite case: browsing the pending queue (`offer list`)
+  *is* the point, so this is new, not a gap being filled.
+- **`rawStore.remove(h Hash) error` / `BlobStore.Remove(h Hash) error`**:
+  deletes the on-disk object for `h`. Every other content-addressed
+  object in this design (patches, blobs, refs' history) is permanent by
+  design — nothing removes them anywhere. An offer is different: it's
+  inherently transient, pending review, and with a small team the volume
+  is low but not zero — leaving handled offers to accumulate forever with
+  no cleanup path felt like an oversight worth avoiding now rather than
+  a problem to notice later, at effectively zero cost (`Remove` is
+  already a stubbed-out method on every `vcsfs` file type today, always
+  returning "not supported" — this gives it one real implementation
+  instead of a fifth stub).
+
+**`vcsfs.go` changes**, sibling to the existing `kindPatches`/
+`kindBlobs`/`kindRefs` machinery:
+
+- `FS` gains an `Offers *patches.BlobStore` field.
+- New `kindOffers` dirKind, name `"offers"`; `kindRoot`'s `Walk` and
+  `Read` (root directory listing) both gain an `"offers"` entry.
+- `dirFile.Walk` gains a `kindOffers` case: parse `name` as a hex hash,
+  `d.fs.Offers.Get(h)`, wrap in the existing `objFile` — **no new
+  read-side permission check**. This was the one real design decision in
+  this whole feature, resolved by reading the code rather than assuming:
+  `objFile` already carries a `perm` field on every read path today, but
+  it's never actually checked — `/patches`, `/blobs`, and `/refs` reads
+  are gated only once, at the TLS handshake, by holding *any* authorized
+  permission (`PermRead` or above). Making offers specifically
+  `PermWrite`-only-to-read would be new gating logic invented for a
+  privacy property nobody asked for, on top of being inconsistent with
+  every other region of this filesystem. For a small trusted team,
+  teammates seeing each other's pending offers isn't a leak — it's
+  arguably useful (avoids two people proposing the same fix) — so offers
+  are exactly as readable as everything else already is: `PermRead`+.
+- `dirFile.Read`'s `kindOffers` case lists via `d.fs.Offers.List()`,
+  same `p9.Stat`-per-name shape `kindRefs` already builds.
+- `dirFile.Create`'s permission check currently gates every kind
+  uniformly at `d.perm < identity.PermWrite`, checked once before the
+  kind switch. This has to become per-kind, since offers accept the
+  narrower `PermPropose`: `kindOffers` requires `PermPropose`;
+  `kindPatches`/`kindBlobs`/`kindRefs` keep requiring `PermWrite`,
+  unchanged. `Create`'s `kindOffers` case itself returns a `writeFile`
+  exactly like `kindPatches`/`kindBlobs` do — the claimed name is the
+  poster's own SHA-256 of the bundle bytes it's about to write (computed
+  client-side, see below — the same "the client claims a hash, the
+  server verifies it on Close" shape `pushPatch`/`pushBlobIfMissing`
+  already use).
+- `writeFile.Close`'s existing two-way switch (`kindBlobs` / default
+  `kindPatches`) gains a third arm for `kindOffers`: decode the buffered
+  bytes with `bundle.Decode`, reject on a decode failure exactly like a
+  malformed patch is already rejected; check `b.Verify()` — the bundle's
+  *own* signer signature — refusing an unverifiable offer outright rather
+  than letting garbage sit in the queue; then `f.fs.Offers.Put(data)` and
+  the same `got != f.want` hash-mismatch check every other kind already
+  does. Deliberately **not** checked at this point: each inner patch's
+  own `AuthorFingerprint`/`AuthorSignature`. That check already lives in
+  `Bundle.Store` (decision #8), which only runs later when the maintainer
+  actually calls `offer apply` — reusing it there means zero duplicated
+  verification logic, and matches decision #8's existing principle that
+  nothing is integrated (or even fully trusted) until a human explicitly
+  acts on it. An offer sitting in the mailbox is inspectable, not yet
+  trusted at the per-patch level.
+- `objFile.Remove` currently returns "read-only" unconditionally for
+  every kind. It gains one real branch: for `kindOffers` only, require
+  `f.perm >= identity.PermWrite` and call `f.fs.Offers.Remove(h)` (`h`
+  re-parsed from `f.name`, the same hex string `Walk` already validated
+  building this `objFile` — no new field needed). Every other kind's
+  `Remove` is untouched, still permanently read-only.
+
+**`cmd/9vcs/offer.go`**, dispatching on `args[0]` the same style
+`cmdBundle` already uses, with posting as the unlabeled default case
+(matching the CLI sketch already in this section's Vocabulary layout):
+
+```
+9vcs offer [-m MSG] [-peer-fingerprint FP] <peer-addr> <ref-or-hash>...
+9vcs offer list <peer-addr>
+9vcs offer apply <peer-addr> <offer-id>
+9vcs offer remove <peer-addr> <offer-id>
+```
+
+- **Post** (`cmdOfferPost`): resolves each `<ref-or-hash>` via
+  `r.resolveRef` exactly like `bundle export` does, `dialPeer`s to
+  `<peer-addr>` (reusing the same `-peer-fingerprint`-or-known-peers-TOFU
+  path `import`/`reconcile` already use), calls `bundle.Export` in memory
+  (no file — `-o` doesn't apply here), computes
+  `id := patches.Hash(sha256.Sum256(data))`, then
+  `c.Create("offers/"+id.String(), 0o644, p9.OWRITE)` /
+  `Write(data)` / `Close()`, mirroring `pushPatch`'s exact shape in
+  `reconcile.go`. Prints the assigned id and patch count on success.
+- **List** (`cmdOfferList`): `dialPeer`, `c.Open("offers", p9.OREAD)`,
+  `f.ReadDir()` (already exists in the 9p client library,
+  `client.File.ReadDir`/`ReadDirContext` — confirmed by reading
+  `client/file.go`, no library gap here). For each entry, fetches and
+  `bundle.Decode`s it — **not** `bundle.Store`d, pure inspection, the
+  same decode-without-persisting shape `bundle show` already has — and
+  prints one line per offer: short id, signer fingerprint
+  (`identity.Fingerprint(b.SignerPub)`), message, patch count. Touches no
+  local storage at all.
+- **Apply** (`cmdOfferApply`): fetches the one named offer id, decodes,
+  checks `b.Verify()`, calls `b.Store(r.store, r.blobs)` — the exact same
+  three calls `cmdBundleImport` already makes on a file's bytes, just
+  sourced from `c.Open("offers/"+id, p9.OREAD)` instead of
+  `os.ReadFile`. **Deliberately stops there** — it does not run `9vcs
+  apply`'s merge itself. This is the one naming ambiguity worth being
+  explicit about: PLAN's original sketch called this "fetch +
+  selectively apply," which could be read either way. Resolved as
+  fetch-and-store only, ending with the same "nothing integrated yet"
+  message `bundle import` already prints, because (a) it reuses 100% of
+  existing plumbing with zero new merge-triggering logic, and (b) an
+  `apply` command that silently ran a merge and touched `MERGE_HEAD`
+  without the user separately typing `9vcs apply <hash>...` would be the
+  one command in this entire design that skips the explicit
+  review-then-integrate split every other path (`bundle import` /
+  `import` / `reconcile`) enforces. The maintainer's actual flow is:
+  `offer list` to see what's pending, `offer apply <id>` to pull one
+  in locally and verify it, then the ordinary `9vcs apply <hash>...` (or
+  `9vcs diff`/`9vcs merge`) to actually decide what lands — same two
+  deliberate acts the offline bundle path already has.
+- **Remove** (`cmdOfferRemove`): `dialPeer`, `c.Attach(...)` (`*client.Fid`,
+  not `*client.File` — confirmed by reading `client/fid.go`, no library
+  gap here), `root.Walk("offers", id)` then `.Remove()`
+  (`client/fid.go`'s `Fid.Remove`/`RemoveContext`, which issues `Tremove`
+  and clunks the fid regardless of outcome). This is the first
+  client-side delete `cmd/9vcs` will have issued — every other push path
+  in this codebase only ever creates or writes — but the library already
+  supports it, verified directly against v0.5.0's source and exercised
+  live in `vcsfs`'s own `TestOfferRemove`/
+  `TestOfferRemoveRequiresWritePermission`. Server-side, this reaches
+  `objFile.Remove`'s new `kindOffers` branch above, gated at
+  `PermWrite` — only the maintainer can clear a handled offer, matching
+  the same tier that can already move `/refs`.
+
+**Not in scope for this pass**: no notification/push when an offer
+lands — `offer list` is polling, same as `reconcile`'s own
+already-established style, not an event-driven addition. No offer
+"status" (accepted/rejected) tracked anywhere — `remove` is the only
+lifecycle transition, and it's a blunt "I'm done looking at this," not a
+recorded decision. No comment thread, matching decision #8's original
+"what's deliberately left out" for the whole offers concept.
+
 ## Vocabulary (deliberately not GitHub-shaped)
 
 | Instead of | Use |
@@ -988,6 +1178,42 @@ used to say:
   (`objstore/patches`' `TestSigningMustHappenAfterNormalize`) pinning
   the property directly: sign only after `Normalize`, never before.
 
+- `/offers` live variant: built and verified live, exactly as scoped —
+  see decision #8's "`/offers` live variant — concrete scope" for the
+  design. `objstore/patches` gained `rawStore.list`/`remove` (exposed as
+  `BlobStore.List`/`Remove`); `vcsfs.go` gained the `kindOffers` region
+  (an `FS.Offers *patches.BlobStore` field, absent from the namespace
+  entirely when nil — no special case needed for repos that don't care
+  about this); `cmd/9vcs/offer.go` implements `offer` (post) /
+  `list` / `apply` / `remove`. `repo.offers` is opened at `.9vcs/offers`
+  alongside `store`/`blobs`, and `cmdServe` now wires `Offers: r.offers`
+  into the served `vcsfs.FS`.
+
+  Verified live end-to-end over real TLS+9P with three distinct
+  identities, not just the unit-level `vcsfs` tests
+  (`TestOfferPostRoundTrip`, `TestOfferPostRequiresProposePermission`,
+  `TestOfferPostInvalidSignatureRejected`, `TestOfferListing`,
+  `TestOffersAbsentWhenNil`, `TestOfferRemove*`): a `propose`-permission
+  peer (B) posted a real patch as a signed offer to a `write`-permission
+  peer's (A) live `9vcs serve`; A — connecting to its own server as a
+  client, since offers are only ever readable/manageable over 9P, there's
+  no local-disk shortcut — listed it (correct id, signer fingerprint,
+  verified status, patch count, message), fetched+verified+stored it via
+  `offer apply` (confirmed no ref moved, per the fetch-only semantics the
+  spec deliberately chose over auto-integration), then integrated the now-
+  local patch with the ordinary `9vcs apply` (clean merge, the file
+  actually landed in the working tree — proving the whole
+  offer-to-integration pipeline connects, not just that bytes moved), and
+  finally cleared the handled offer with `offer remove`, confirmed gone
+  from a follow-up `offer list`. Permission boundaries held over the real
+  wire in both directions the design calls for: a `read`-only third peer
+  (C) could list (matching the "reads aren't specially gated" decision)
+  but was refused posting and removing; the `propose`-only poster (B)
+  was refused removing its own posted offer. No bugs found in this live
+  pass — unlike bundle export/import and `apply`, which each surfaced a
+  real bug during their live verification, this one confirmed the design
+  as specced without needing a fix.
+
 ## Open items to revisit
 
 - Bundle export/import and `apply` (decision #8: signed, offline patch
@@ -998,8 +1224,9 @@ used to say:
   machinery (`Linearize`/`Resolve`) was already N-way and only the
   CLI-facing `computeMerge`/`MERGE_HEAD` layer needed generalizing from
   two sides to N. The optional live `/offers` variant (decision #8,
-  `propose` permission tier) is still unbuilt — the last unbuilt piece
-  of decision #8.
+  `propose` permission tier) is now built and verified live too — see
+  Status. That closes out decision #8 entirely: bundle export/import,
+  `apply`, and `/offers` are all built.
 - `Patch.Author` end to end is now fully built: Tier 1 (configurable
   `user.name`/`user.email`, no wire format change) and
   `AuthorFingerprint`/`AuthorSignature` (real per-patch signing verified

@@ -21,11 +21,12 @@ const defaultBranch = "main"
 
 // repo resolves the paths and stores for one 9vcs repository.
 type repo struct {
-	root  string // working tree root (parent of .9vcs)
-	dir   string // .9vcs
-	store *patches.Store
-	blobs *patches.BlobStore
-	cache *synth.Cache // memoizes materialize within this one invocation
+	root   string // working tree root (parent of .9vcs)
+	dir    string // .9vcs
+	store  *patches.Store
+	blobs  *patches.BlobStore
+	offers *patches.BlobStore // pending offer bundles received via `9vcs serve`'s /offers — see PLAN.md decision #8
+	cache  *synth.Cache       // memoizes materialize within this one invocation
 
 	// refMu guards setRefHashCAS's check-then-write against concurrent
 	// peer connections within one `9vcs serve` process — the only case
@@ -70,7 +71,11 @@ func openRepo(root string) (*repo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &repo{root: root, dir: dir, store: store, blobs: blobs, cache: synth.NewCache(store)}, nil
+	offers, err := patches.OpenBlobs(filepath.Join(dir, "offers"))
+	if err != nil {
+		return nil, err
+	}
+	return &repo{root: root, dir: dir, store: store, blobs: blobs, offers: offers, cache: synth.NewCache(store)}, nil
 }
 
 // materialize is patches.Materialize(r.store, roots...), memoized for

@@ -25,3 +25,13 @@ func (s *BlobStore) Get(h Hash) ([]byte, error) { return s.raw.get(h) }
 
 // Has reports whether h is present in the store.
 func (s *BlobStore) Has(h Hash) bool { return s.raw.has(h) }
+
+// Remove deletes the blob stored under h, if present. Every other
+// content-addressed object in this design is permanent — this exists for
+// vcsfs's /offers use of BlobStore, where a stored object (a pending
+// bundle) is genuinely transient and the maintainer needs a way to clear
+// a handled one. A no-op, not an error, if h was never stored.
+func (s *BlobStore) Remove(h Hash) error { return s.raw.remove(h) }
+
+// List returns every hash currently stored, in no particular order.
+func (s *BlobStore) List() ([]Hash, error) { return s.raw.list() }
