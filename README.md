@@ -148,12 +148,32 @@ dc611bf0985a7df6680f83479f15244d91025f4392575b392d754f32cec5fdba propose
 - `write` — everything, including moving a branch ref directly.
 
 There's no separate "add a collaborator" command — it's just editing
-this file. Removing a line revokes access immediately.
+this file. `serve` only reads it once, at startup, though — a change
+(adding, removing, or re-permissioning a peer) doesn't take effect on
+an already-running `serve`; restart it to pick up the new file. If
+you're revoking someone because their key may be compromised, restart
+right away, not "whenever convenient" — until you do, they still have
+their old access.
+
+If you plan to use `offer list`/`offer apply`/`offer remove` against
+your own `serve` (see
+[Proposing a change without write access](#proposing-a-change-without-write-access)),
+add your *own* fingerprint to this same file too — those commands
+connect to your server just like any other peer would, and without an
+entry here for yourself, the connection is refused.
 
 `serve` runs in the foreground, for as long as you want it reachable —
 there's no background daemon. For a small team this usually means
 running it in a terminal (or `tmux`/tmux-like session) whenever people
 need to sync, not something that has to run 24/7.
+
+One thing to plan around: a network push refuses to move whatever
+branch is currently checked out on the machine running `serve` (it
+would desync that working tree from the ref otherwise). If the same
+branch name (e.g. `main`) is both served and actively worked on
+locally by whoever's hosting, either keep a different branch checked
+out there (`9vcs checkout -b parking` once, and leave it) or use a
+dedicated directory just for serving that nobody works in directly.
 
 ### Onboarding a new teammate
 
@@ -229,7 +249,11 @@ it once handled:
 
 Note the maintainer runs `offer list`/`apply`/`remove` *against their own
 running `serve`* — offers only exist inside that live namespace, there's
-no local-disk shortcut to inspect them directly.
+no local-disk shortcut to inspect them directly. That means the
+maintainer's own fingerprint needs an entry in their own
+`authorized-peers` too (see [Serving a repo](#serving-a-repo)) — these
+commands connect exactly like any other peer would, and without one,
+the connection is refused.
 
 ## Recovering from a mistake
 

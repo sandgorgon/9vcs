@@ -7,6 +7,37 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.1] - 2026-08-25
+
+Follow-ups from actually dogfooding v0.1.0 (a real two-person-plus
+workflow: `serve`/`import`/`reconcile` including genuine divergence
+and conflict resolution, `bundle export`/`import`, `offer`/`offer
+apply`). No functional or security issues found — these are all
+polish/documentation gaps.
+
+### Fixed
+
+- `9vcs help`'s `status` line still advertised the removed rename
+  detection's `R`/`R+` codes; corrected to `(A/M/D/U)`.
+- Text conflicts (the most common kind) fell through to a generic
+  `CONFLICT: path` message in `merge`/`apply`'s output, unlike
+  binary/symlink/type/modify-delete conflicts, which all got a
+  specific, actionable one. Added an explicit message pointing at the
+  `<<<<<<<`/`=======`/`>>>>>>>` markers.
+
+### Documentation
+
+- Clarified that `serve` only reads `.9vcs/authorized-peers` once, at
+  startup — editing it doesn't revoke or grant access on an
+  already-running server the way "immediately" implied.
+- Documented that running `offer list`/`apply`/`remove` against your
+  own `serve` requires your own fingerprint to also be listed in your
+  own `authorized-peers` — otherwise the connection is refused.
+- Documented the "a network push refuses to move the branch checked
+  out on the serving machine" behavior in the team workflow section,
+  with the actual recommended pattern (keep a non-shared branch
+  checked out where you serve from).
+
 ## [0.1.0] - 2026-08-25
 
 First tagged release.
