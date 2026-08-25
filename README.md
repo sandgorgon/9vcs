@@ -278,6 +278,23 @@ Run `9vcs help` for the complete, current list with exact flags — this
 document sticks to walkthroughs so it doesn't drift out of sync with
 that.
 
+## Contributing to 9vcs itself
+
+This is about developing the `9vcs` codebase on GitHub — a separate
+thing from using the `9vcs` tool with your own team, described above.
+
+Trunk-based, short-lived branches:
+
+- `master` is always releasable. Nobody pushes to it directly — even
+  repo admins are blocked, by branch protection, not just convention.
+- Branch, make a focused change, open a pull request. Keep it small and
+  short-lived rather than letting it drift from `master`.
+- CI (build, `vet`, `gofmt`, `go test -race`) has to pass before a PR
+  can merge — see [.github/workflows/ci.yml](.github/workflows/ci.yml).
+- Merging is squash-only, and the branch is deleted automatically once
+  it lands — `master`'s history stays one squashed commit per PR, no
+  merge commits.
+
 ## Learn more
 
 [PLAN.md](PLAN.md) has the full design: why patches instead of
