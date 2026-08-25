@@ -181,6 +181,8 @@ func cmdApply(args []string) error {
 			fmt.Printf("  CONFLICT (modify/delete): %s — deleted by %s, modified elsewhere; kept the modified version\n", c.Path, c.DeletedBy)
 		case "symlink":
 			fmt.Printf("  CONFLICT (symlink): %s — kept your target; other target(s): %s\n", c.Path, strings.Join(c.OtherTargets, ", "))
+		case "type":
+			fmt.Printf("  CONFLICT (type): %s — this path is a different kind of thing (text/binary/symlink) on each side; kept your version\n", c.Path)
 		default:
 			fmt.Printf("  CONFLICT: %s\n", c.Path)
 		}

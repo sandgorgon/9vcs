@@ -212,13 +212,13 @@ func Decode(data []byte) (*Bundle, error) {
 	}
 	b.Message = message
 
-	nPatches, err := readCount(pr, "bundle: decoding patch count")
+	nPatches, err := readCount(pr, minPatchEntrySize, "bundle: decoding patch count")
 	if err != nil {
 		return nil, err
 	}
 	b.Patches = make([]*patches.Patch, 0, nPatches)
 	for i := int64(0); i < nPatches; i++ {
-		n, err := readCount(pr, fmt.Sprintf("bundle: decoding patch %d length", i))
+		n, err := readCount(pr, 1, fmt.Sprintf("bundle: decoding patch %d length", i))
 		if err != nil {
 			return nil, err
 		}
@@ -233,7 +233,7 @@ func Decode(data []byte) (*Bundle, error) {
 		b.Patches = append(b.Patches, p)
 	}
 
-	nBlobs, err := readCount(pr, "bundle: decoding blob count")
+	nBlobs, err := readCount(pr, minBlobEntrySize, "bundle: decoding blob count")
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +243,7 @@ func Decode(data []byte) (*Bundle, error) {
 		if _, err := io.ReadFull(pr, h[:]); err != nil {
 			return nil, fmt.Errorf("bundle: decoding blob %d hash: %w", i, err)
 		}
-		n, err := readCount(pr, fmt.Sprintf("bundle: decoding blob %d length", i))
+		n, err := readCount(pr, 1, fmt.Sprintf("bundle: decoding blob %d length", i))
 		if err != nil {
 			return nil, err
 		}
@@ -258,7 +258,7 @@ func Decode(data []byte) (*Bundle, error) {
 }
 
 func readString(r *bytes.Reader) (string, error) {
-	n, err := readCount(r, "bundle: decoding string length")
+	n, err := readCount(r, 1, "bundle: decoding string length")
 	if err != nil {
 		return "", err
 	}
@@ -269,19 +269,36 @@ func readString(r *bytes.Reader) (string, error) {
 	return string(buf), nil
 }
 
+// minPatchEntrySize/minBlobEntrySize are the fewest bytes a single
+// Patches/Blobs entry can possibly take in the encoding — an entry's own
+// length prefix (8 bytes) at minimum, plus a fixed-size Hash (32 bytes)
+// for a blob entry, which also carries one ahead of its length prefix.
+// Used as readCount's minElemSize for the patch/blob *count* fields —
+// see readCount's doc comment for why a per-element floor matters, not
+// just a raw remaining-bytes bound.
+const (
+	minPatchEntrySize = 8
+	minBlobEntrySize  = 32 + 8
+)
+
 // readCount reads a length-prefixed count or size and validates it
-// against how many bytes actually remain in r before returning — see
-// objstore/patches's identical helper for the full rationale. Every
-// count that goes on to size a make() in this package is read through
-// this, not readInt64 directly, so a corrupted or adversarial .9vp file
-// produces a clean decode error instead of an out-of-range allocation
-// panic.
-func readCount(r *bytes.Reader, what string) (int64, error) {
+// against how many elements could plausibly still fit in the bytes
+// remaining in r, given minElemSize — the minimum number of bytes any
+// single element's own encoding can possibly take (1 for a raw byte
+// count like readString's, or a small fixed floor for a Patches/Blobs
+// entry; see each call site) — see objstore/patches's identical helper
+// for the full rationale (bounding against raw remaining bytes alone
+// isn't enough once one element costs far more than one byte to
+// encode). Every count that goes on to size a make() in this package is
+// read through this, not readInt64 directly, so a corrupted or
+// adversarial .9vp file produces a clean decode error instead of an
+// oversized or out-of-range allocation.
+func readCount(r *bytes.Reader, minElemSize int64, what string) (int64, error) {
 	n, err := readInt64(r)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", what, err)
 	}
-	if n < 0 || n > int64(r.Len()) {
+	if n < 0 || n > int64(r.Len())/minElemSize {
 		return 0, fmt.Errorf("%s: implausible length %d (%d bytes remain)", what, n, r.Len())
 	}
 	return n, nil

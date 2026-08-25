@@ -243,6 +243,46 @@ func TestComputeMergeThreeWayBinaryConflictAbsentFromOurs(t *testing.T) {
 	}
 }
 
+// TestComputeMergeThreeWayTypeMismatchConflict is the regression test
+// for a gap the fix above (TestComputeMergeThreeWayBinaryConflictAbsentFromOurs)
+// didn't fully close: the anchor (the first root that has the path at
+// all) only got compared against other roots' values when their Kind
+// matched the anchor's — a root with the *same path* under a
+// completely different Kind (text vs. blob) was never flagged at all.
+// merged[p] silently kept whichever kind Materialize's union happened
+// to pick, discarding the other side's content entirely with no
+// reported conflict — the same class of silent data loss, just for a
+// kind mismatch instead of an "absent from ours" gap.
+func TestComputeMergeThreeWayTypeMismatchConflict(t *testing.T) {
+	r := newTestRepo(t)
+
+	base, idx := recordTestPatch(t, r, nil, "keep.txt", []string{"unrelated"}, patches.Index{})
+
+	// a introduces "thing" as text.
+	a, _ := recordTestPatch(t, r, []patches.Hash{base}, "thing", []string{"hello", "world"}, idx)
+
+	// b introduces the same path as a binary blob instead.
+	blobB, err := r.blobs.Put([]byte("binary content"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "thing", Kind: patches.KindBlob, Blob: blobB}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged, conflicts, err := computeMerge(r, a, b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Kind != "type" || conflicts[0].Path != "thing" {
+		t.Fatalf("expected one type conflict on thing, got %v", conflicts)
+	}
+	if merged["thing"].Kind != patches.KindText {
+		t.Errorf("expected roots[0]'s (a's) text content kept, got Kind=%v", merged["thing"].Kind)
+	}
+}
+
 func sameStringsHelper(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

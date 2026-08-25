@@ -316,3 +316,27 @@ func TestDecodeRejectsImplausibleLength(t *testing.T) {
 		t.Fatal("expected an error decoding an implausible dependency count, got nil")
 	}
 }
+
+// TestDecodeRejectsDependencyCountNotBackedByHashSize is a regression
+// for an allocation-amplification gap in readCount: a count used to be
+// validated only against total bytes remaining, not against how many
+// bytes one element actually needs. A dependency count that fit within
+// the bytes remaining (so the old bound would have accepted it) but
+// wasn't actually enough bytes to back that many 32-byte Hashes — e.g.
+// claiming 50 dependencies (needs 1600 bytes) backed by only 50 bytes
+// remaining — used to pass, forcing p.Dependencies := make([]Hash, 50)
+// to over-allocate before the per-dependency reads ran out of buffer and
+// failed anyway. Now rejected immediately by readCount itself, before
+// any allocation.
+func TestDecodeRejectsDependencyCountNotBackedByHashSize(t *testing.T) {
+	var buf bytes.Buffer
+	buf.WriteByte(patchFormatVersion)
+	var countBytes [8]byte
+	binary.BigEndian.PutUint64(countBytes[:], 50)
+	buf.Write(countBytes[:])
+	buf.Write(make([]byte, 50)) // old bound (50 <= 50 remaining) would have accepted this
+
+	if _, err := Decode(buf.Bytes()); err == nil {
+		t.Fatal("expected an error decoding a dependency count not backed by enough bytes for hashSize, got nil")
+	}
+}
