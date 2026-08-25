@@ -227,6 +227,60 @@ func TestSigningMustHappenAfterNormalize(t *testing.T) {
 	}
 }
 
+// TestValidPath exercises the actual traversal vectors a crafted patch
+// could carry, not just the obvious "../etc/passwd" case.
+func TestValidPath(t *testing.T) {
+	valid := []string{"a.txt", "dir/file.txt", "a/b/c.txt", ".hidden", "a..b.txt"}
+	for _, p := range valid {
+		if !validPath(p) {
+			t.Errorf("validPath(%q) = false, want true", p)
+		}
+	}
+	invalid := []string{
+		"", "/etc/passwd", "../outside.txt", "a/../../outside.txt",
+		"a/..", "..", "./a.txt", "a//b.txt", "a/./b.txt", "a/b/",
+	}
+	for _, p := range invalid {
+		if validPath(p) {
+			t.Errorf("validPath(%q) = true, want false", p)
+		}
+	}
+}
+
+// TestDecodeRejectsPathTraversal is the direct regression test for a
+// real, live-proven vulnerability: a crafted patch with a ".."-escaping
+// Path, delivered as an ordinary signed bundle and applied normally,
+// wrote a file completely outside the victim's repo (confirmed against
+// the real binary before this fix existed — see PLAN.md's "Path
+// traversal via FileChange.Path" for the full writeup). Built by
+// Encode-ing a Patch directly (Encode itself doesn't validate — only
+// Decode, the actual ingestion boundary, does) so this exercises exactly
+// what a received-over-the-wire malicious patch looks like.
+func TestDecodeRejectsPathTraversal(t *testing.T) {
+	for _, evil := range []string{"../outside.txt", "/etc/passwd", "a/../../outside.txt"} {
+		p := &Patch{Message: "innocuous", Changes: []FileChange{
+			{Path: evil, Kind: KindText, TrailingNewline: true, Ops: []LineOp{{Kind: OpInsert, ID: "a", Content: "pwned"}}},
+		}}
+		data := p.Encode()
+		if _, err := Decode(data); err == nil {
+			t.Errorf("Decode accepted a patch with path %q, want a rejection", evil)
+		}
+	}
+}
+
+func TestStorePutRejectsPathTraversal(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &Patch{Message: "innocuous", Changes: []FileChange{
+		{Path: "../outside.txt", Kind: KindText, TrailingNewline: true, Ops: []LineOp{{Kind: OpInsert, ID: "a", Content: "pwned"}}},
+	}}
+	if _, err := store.Put(p); err == nil {
+		t.Error("Store.Put accepted a patch with a path-traversal Path, want a rejection")
+	}
+}
+
 func TestDecodeRejectsUnrecognizedFormatByte(t *testing.T) {
 	if _, err := Decode([]byte{0}); err == nil {
 		t.Fatal("expected an error decoding format byte 0 (never issued), got nil")

@@ -378,6 +378,67 @@ that differ only in one file's executable bit correctly flipped the bit
 each direction, on the same already-existing path — the exact scenario
 bug 2 above would have silently gotten wrong.
 
+#### Path traversal via `FileChange.Path` — real vulnerability, found and fixed (2026-08-25)
+
+**Found while auditing for other gaps, not reported by anyone — verified
+live before being called real, not assumed from reading code alone.**
+`writeWorkingTree` (`cmd/9vcs/workingtree.go`) reaches every write via a
+plain `filepath.Join(r.root, filepath.FromSlash(p))`. `filepath.Join`
+does not confine the result to stay under `r.root` — a `p` containing
+`../` segments resolves straight through and out. A real local `record`
+can never produce such a path (`workingFiles` only ever discovers paths
+via an actual `filepath.WalkDir` under the repo root), so this was
+never reachable through normal use — but nothing validated
+`FileChange.Path` on *ingestion*, and a patch's path is exactly the kind
+of field a received-from-elsewhere patch controls: `import`/`reconcile`
+(a peer's push), a served `/patches` write, or a bundle file all hand a
+`Path` string to this codebase with no local walk ever having produced
+it.
+
+**Proven exploitable, live, before writing a single line of fix**: a
+`.9vp` bundle was hand-crafted (a legitimately Ed25519-signed patch,
+signature and all — exactly what any authorized `propose`/`write` peer
+could produce) with a `FileChange.Path` of `../../../../pwned.txt`,
+imported via the real `9vcs bundle import` and integrated via the real
+`9vcs apply` against a real victim repo. The file landed exactly where
+crafted, completely outside the victim's repo directory. `AuthorSignature`
+verification passed throughout — the entire point of this finding: a
+signature proves *who wrote the patch*, never that its *paths* are safe
+to materialize, and nothing else in the design was checking that
+separately.
+
+**Fix: `validPath` (`objstore/patches/patch.go`)**, checked at both
+places a `Patch` can come to be persisted:
+- `Decode` — every patch received from outside this process (a peer
+  fetch, a bundle, a served write) goes through this, so a malicious
+  patch is refused the moment it's first decoded anywhere, before it can
+  even propagate.
+- `Store.Put` — every patch that's ever actually stored, however the
+  `*Patch` value was built, as an independent backstop.
+
+`validPath` rejects an empty path, a leading `/`, and — the part that
+took a second pass to get right — a bare `..` at the front, since
+`path.Clean` cannot eliminate a *leading* `..` in a relative path (its
+own doc comment: retained when there's no preceding non-`..` element to
+cancel it against) — meaning `path.Clean(p) == p` alone, the obvious
+first attempt, does **not** reject `"../outside.txt"` at all, since
+Clean leaves it untouched as already-canonical. Caught by
+`TestValidPath` failing against exactly that input before the fix
+shipped, not found by accident: fixed by an explicit per-segment scan
+for a literal `".."` component, layered on top of the `Clean` check
+(which still does its job for every other case — empty segments,
+redundant `./`, `a/../b`, a trailing `/`).
+
+**Verified**: `TestValidPath`, `TestDecodeRejectsPathTraversal`, and
+`TestStorePutRejectsPathTraversal` (`objstore/patches`) cover the
+matcher and both ingestion points directly; `vcsfs`'s
+`TestPatchWritePathTraversalRejected` covers the same over the real
+network write path (a served peer push), refused with the same severity
+as a hash mismatch or a forged authorship claim, and never stored under
+any hash — mirroring how `TestPatchWriteForgedAuthorshipRejected`
+already proved the *authorship* side of "don't trust bytes just because
+they parse."
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:

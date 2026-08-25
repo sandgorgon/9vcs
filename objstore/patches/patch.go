@@ -11,7 +11,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"path"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -103,6 +105,44 @@ const (
 	// cmd/9vcs/mergeutil.go's computeMerge).
 	KindSymlink
 )
+
+// validPath reports whether p is safe to join under a repo root and
+// write to: repo-relative (no leading "/"), forward-slash, already in
+// canonical form (no "..", no empty segments, no redundant "./"). A
+// FileChange's Path ultimately reaches os.WriteFile/os.Symlink via a
+// plain filepath.Join with the repo root (writeWorkingTree,
+// cmd/9vcs/workingtree.go) — Join does not confine a ".."-containing
+// path to stay under root, it just resolves straight through, so a
+// patch carrying one would write completely outside the repo the
+// moment it's applied or checked out. A genuine local `record` can
+// never produce such a path (every path it sees comes from an actual
+// filepath.WalkDir under the repo root — see workingFiles), so the only
+// way one exists is a patch crafted by an adversarial or simply buggy
+// peer and received via import/reconcile, a served write, or a bundle.
+// Checked at both places a Patch can come to be persisted — Decode
+// (every patch received from outside this process) and Store.Put
+// (every patch that's ever stored, however it was built) — so there is
+// no route to a stored Patch carrying an unsafe path.
+func validPath(p string) bool {
+	if p == "" || strings.HasPrefix(p, "/") {
+		return false
+	}
+	if path.Clean(p) != p {
+		return false // catches empty segments, redundant "./", a trailing "/", "a/../b", etc.
+	}
+	// path.Clean's own doc comment: a ".." with no preceding non-".."
+	// element to cancel against is *retained*, not an error — there's
+	// nothing wrong, from Clean's own perspective, with "../etc/passwd"
+	// or a bare "..", since neither has anything earlier in the path to
+	// resolve it against. That's exactly the traversal case this exists
+	// to catch, so it needs its own explicit check.
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
 
 // FileChange is the change to one path recorded by a single patch.
 type FileChange struct {
@@ -292,9 +332,12 @@ func Decode(data []byte) (*Patch, error) {
 	}
 	p.Changes = make([]FileChange, 0, nChanges)
 	for i := int64(0); i < nChanges; i++ {
-		path, err := readString(r)
+		changePath, err := readString(r)
 		if err != nil {
 			return nil, fmt.Errorf("patch: decode change %d path: %w", i, err)
+		}
+		if !validPath(changePath) {
+			return nil, fmt.Errorf("patch: decode change %d: unsafe path %q (escapes the repo root or isn't in canonical form)", i, changePath)
 		}
 		kindByte, err := r.ReadByte()
 		if err != nil {
@@ -345,7 +388,7 @@ func Decode(data []byte) (*Patch, error) {
 			ops = append(ops, LineOp{Kind: OpKind(opKindByte), ID: id, Prev: prev, Next: next, Content: content})
 		}
 		p.Changes = append(p.Changes, FileChange{
-			Path:            path,
+			Path:            changePath,
 			Kind:            ChangeKind(kindByte),
 			TrailingNewline: trailingNewline,
 			Executable:      executable,
