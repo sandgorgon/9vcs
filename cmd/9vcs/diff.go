@@ -99,10 +99,15 @@ func diffRefs(r *repo, a, b string) error {
 		case !inB:
 			changes[p] = patches.FileChange{Path: p, Kind: patches.KindDelete}
 		case stB.Kind == patches.KindBlob:
-			if inA && stA.Kind == patches.KindBlob && stA.Blob == stB.Blob {
+			if inA && stA.Kind == patches.KindBlob && stA.Blob == stB.Blob && stA.Executable == stB.Executable {
 				continue // unchanged
 			}
-			changes[p] = patches.FileChange{Path: p, Kind: patches.KindBlob, Blob: stB.Blob}
+			changes[p] = patches.FileChange{Path: p, Kind: patches.KindBlob, Blob: stB.Blob, Executable: stB.Executable}
+		case stB.Kind == patches.KindSymlink:
+			if inA && stA.Kind == patches.KindSymlink && stA.SymlinkTarget == stB.SymlinkTarget {
+				continue // unchanged
+			}
+			changes[p] = patches.FileChange{Path: p, Kind: patches.KindSymlink, SymlinkTarget: stB.SymlinkTarget}
 		default: // stB is text
 			baseLinesA := linesOf(stA)
 			newLinesB := linesOf(stB)
@@ -111,10 +116,10 @@ func diffRefs(r *repo, a, b string) error {
 				newContent[i] = l.Content
 			}
 			ops, _ := patches.Diff(baseLinesA, newContent)
-			if len(ops) == 0 && inA && stA.Kind == patches.KindText && stA.TrailingNewline == stB.TrailingNewline {
+			if len(ops) == 0 && inA && stA.Kind == patches.KindText && stA.TrailingNewline == stB.TrailingNewline && stA.Executable == stB.Executable {
 				continue // unchanged
 			}
-			changes[p] = patches.FileChange{Path: p, Kind: patches.KindText, Ops: ops, TrailingNewline: stB.TrailingNewline}
+			changes[p] = patches.FileChange{Path: p, Kind: patches.KindText, Ops: ops, TrailingNewline: stB.TrailingNewline, Executable: stB.Executable}
 		}
 	}
 	renderChanges(idxA, changes)
@@ -143,21 +148,37 @@ func renderDiff(path string, base patches.PathState, change patches.FileChange) 
 	baseLines := linesOf(base)
 	switch change.Kind {
 	case patches.KindDelete:
-		if base.Kind == patches.KindBlob {
+		switch base.Kind {
+		case patches.KindBlob:
 			fmt.Printf("deleted binary file %s\n", path)
-			return
+		case patches.KindSymlink:
+			fmt.Printf("deleted symlink %s -> %s\n", path, base.SymlinkTarget)
+		default:
+			if len(baseLines) == 0 {
+				return
+			}
+			fmt.Printf("--- %s\n+++ /dev/null\n", path)
+			for _, l := range baseLines {
+				fmt.Printf("-%s\n", l.Content)
+			}
 		}
-		if len(baseLines) == 0 {
-			return
-		}
-		fmt.Printf("--- %s\n+++ /dev/null\n", path)
-		for _, l := range baseLines {
-			fmt.Printf("-%s\n", l.Content)
+	case patches.KindSymlink:
+		if base.Kind == patches.KindSymlink {
+			fmt.Printf("symlink %s: %s -> %s\n", path, base.SymlinkTarget, change.SymlinkTarget)
+		} else {
+			fmt.Printf("new symlink %s -> %s\n", path, change.SymlinkTarget)
 		}
 	case patches.KindBlob:
+		if base.Kind == patches.KindBlob && base.Blob == change.Blob {
+			printModeChange(path, base.Executable, change.Executable)
+			return
+		}
 		fmt.Printf("Binary files %s and %s differ\n", path, path)
 	default: // KindText
 		if len(change.Ops) == 0 {
+			if base.Kind == patches.KindText {
+				printModeChange(path, base.Executable, change.Executable)
+			}
 			return
 		}
 		baseContent := make(map[string]string, len(baseLines))
@@ -173,6 +194,23 @@ func renderDiff(path string, base patches.PathState, change patches.FileChange) 
 				fmt.Printf("+%s\n", op.Content)
 			}
 		}
+	}
+}
+
+// printModeChange prints a minimal note for the case changedFiles/diffRefs'
+// unchanged-checks now catch: content is byte-for-byte (or line-for-line)
+// identical and only the executable bit flipped. Without this, that change
+// would still be correctly recorded (changedFiles doesn't miss it) but
+// would render as if diff found nothing at all — misleading, even though
+// nothing is actually wrong.
+func printModeChange(path string, wasExecutable, isExecutable bool) {
+	if wasExecutable == isExecutable {
+		return
+	}
+	if isExecutable {
+		fmt.Printf("mode changed: %s (now executable)\n", path)
+	} else {
+		fmt.Printf("mode changed: %s (no longer executable)\n", path)
 	}
 }
 

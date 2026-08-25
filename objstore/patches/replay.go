@@ -6,15 +6,17 @@ import (
 	"sort"
 )
 
-// PathState is one path's materialized state at some point in history:
-// either a line graph (KindText) or a whole-file blob hash (KindBlob). A
-// path absent from an Index has never existed, or was deleted, at that
-// point.
+// PathState is one path's materialized state at some point in history: a
+// line graph (KindText), a whole-file blob hash (KindBlob), or a symlink
+// target (KindSymlink). A path absent from an Index has never existed, or
+// was deleted, at that point.
 type PathState struct {
 	Kind            ChangeKind
 	Graph           *FileGraph // KindText only
 	TrailingNewline bool       // KindText only
+	Executable      bool       // KindText or KindBlob only — see FileChange.Executable
 	Blob            Hash       // KindBlob only
+	SymlinkTarget   string     // KindSymlink only
 }
 
 // Index is the materialized state of every path touched by some point in
@@ -208,7 +210,10 @@ func Materialize(store *Store, roots ...Hash) (Index, error) {
 				delete(idx, fc.Path)
 				delete(graphs, fc.Path)
 			case KindBlob:
-				idx[fc.Path] = PathState{Kind: KindBlob, Blob: fc.Blob}
+				idx[fc.Path] = PathState{Kind: KindBlob, Blob: fc.Blob, Executable: fc.Executable}
+				delete(graphs, fc.Path)
+			case KindSymlink:
+				idx[fc.Path] = PathState{Kind: KindSymlink, SymlinkTarget: fc.SymlinkTarget}
 				delete(graphs, fc.Path)
 			default: // KindText
 				g, ok := graphs[fc.Path]
@@ -217,7 +222,7 @@ func Materialize(store *Store, roots ...Hash) (Index, error) {
 					graphs[fc.Path] = g
 				}
 				g.apply(fc.Ops)
-				idx[fc.Path] = PathState{Kind: KindText, Graph: g, TrailingNewline: fc.TrailingNewline}
+				idx[fc.Path] = PathState{Kind: KindText, Graph: g, TrailingNewline: fc.TrailingNewline, Executable: fc.Executable}
 			}
 		}
 	}

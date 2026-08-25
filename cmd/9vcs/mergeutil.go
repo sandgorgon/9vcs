@@ -10,13 +10,19 @@ import (
 // mergeConflict is one path computeMerge couldn't resolve automatically.
 type mergeConflict struct {
 	Path string
-	Kind string // "text", "binary", "modify/delete"
+	Kind string // "text", "binary", "modify/delete", "symlink"
 	// DeletedBy identifies the deleting side for a "modify/delete"
 	// conflict: "ours"/"theirs" for a plain two-root merge (kept as-is,
 	// rather than renamed, so existing two-way conflict messages don't
 	// change); a short hash once there are more than two roots and
 	// "ours"/"theirs" stops meaning anything — see sideLabel.
 	DeletedBy string
+	// OtherTargets is "symlink" only: every distinct target among the
+	// other roots (ours' own target is kept and isn't repeated here). A
+	// symlink target is a short, human-readable string, unlike blob
+	// content, so the conflict message can just list them inline —
+	// no comparison sidecar file needed the way a binary conflict gets.
+	OtherTargets []string
 }
 
 // sideLabel names roots[i] for a conflict message.
@@ -69,22 +75,38 @@ func computeMerge(r *repo, roots ...patches.Hash) (patches.Index, []mergeConflic
 	byPath := map[string]mergeConflict{}
 	add := func(c mergeConflict) { byPath[c.Path] = c }
 
-	// Binary conflicts: more than one distinct blob hash among roots for
-	// the same path. roots[0] ("ours") wins the kept content, same
-	// keep-a-side policy as the original two-way version.
+	// Binary and symlink conflicts: more than one distinct value among
+	// roots for the same atomic (non-line-graph) path — a whole-file
+	// blob or a symlink target, neither of which has a line-level merge
+	// that makes sense. roots[0] ("ours") wins the kept content, same
+	// keep-a-side policy the two-way version always used.
 	for p, ourSt := range idxs[0] {
-		if ourSt.Kind != patches.KindBlob {
-			continue
-		}
-		conflicted := false
-		for i := 1; i < len(idxs); i++ {
-			if st, ok := idxs[i][p]; ok && st.Kind == patches.KindBlob && st.Blob != ourSt.Blob {
-				conflicted = true
+		switch ourSt.Kind {
+		case patches.KindBlob:
+			conflicted := false
+			for i := 1; i < len(idxs); i++ {
+				if st, ok := idxs[i][p]; ok && st.Kind == patches.KindBlob && st.Blob != ourSt.Blob {
+					conflicted = true
+				}
 			}
-		}
-		if conflicted {
-			add(mergeConflict{Path: p, Kind: "binary"})
-			merged[p] = ourSt
+			if conflicted {
+				add(mergeConflict{Path: p, Kind: "binary"})
+				merged[p] = ourSt
+			}
+		case patches.KindSymlink:
+			seen := map[string]bool{}
+			var others []string
+			for i := 1; i < len(idxs); i++ {
+				if st, ok := idxs[i][p]; ok && st.Kind == patches.KindSymlink && st.SymlinkTarget != ourSt.SymlinkTarget && !seen[st.SymlinkTarget] {
+					seen[st.SymlinkTarget] = true
+					others = append(others, st.SymlinkTarget)
+				}
+			}
+			if len(others) > 0 {
+				sort.Strings(others)
+				add(mergeConflict{Path: p, Kind: "symlink", OtherTargets: others})
+				merged[p] = ourSt
+			}
 		}
 	}
 

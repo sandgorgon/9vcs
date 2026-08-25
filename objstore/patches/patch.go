@@ -94,6 +94,14 @@ const (
 	KindBlob
 	// KindDelete: the path is removed. Ops/TrailingNewline/Blob are unused.
 	KindDelete
+	// KindSymlink: the path becomes a symbolic link pointing at
+	// SymlinkTarget. Stored as a plain string, not content-addressed via
+	// Blob — a symlink target is a handful of bytes, not file content, so
+	// a separate blob-store entry would be pure overhead. Like KindBlob,
+	// there's no line-level merge for a symlink target: two roots
+	// pointing it at different targets is a conflict, not a fork (see
+	// cmd/9vcs/mergeutil.go's computeMerge).
+	KindSymlink
 )
 
 // FileChange is the change to one path recorded by a single patch.
@@ -103,8 +111,19 @@ type FileChange struct {
 
 	Ops             []LineOp // KindText only
 	TrailingNewline bool     // KindText only: did the recorded content end in '\n'?
+	// Executable applies to KindText and KindBlob (a symlink's own mode
+	// bits are meaningless in POSIX — what matters is its target's — so
+	// KindSymlink never sets this): whether the file's owner-execute bit
+	// was set when recorded. Checked and restored alongside content, not
+	// as a separate conflict category — an executable-bit-only
+	// disagreement between two branches (content otherwise identical)
+	// isn't flagged as a conflict, unlike a genuine content difference;
+	// see mergeutil.go's computeMerge doc comment for the deliberate
+	// scope cut.
+	Executable bool
 
-	Blob Hash // KindBlob only: hash of the whole file in the blob store
+	Blob          Hash   // KindBlob only: hash of the whole file in the blob store
+	SymlinkTarget string // KindSymlink only: the link's target, exactly as read via os.Readlink
 }
 
 // patchFormatVersion tags Encode's output so a genuinely incompatible
@@ -118,7 +137,13 @@ type FileChange struct {
 // decode path) is a decision to make once there's a formal release and
 // therefore real data whose compatibility actually matters — see
 // PLAN.md decision #1.
-const patchFormatVersion byte = 1
+//
+// Bumped 1 -> 2 to add FileChange.Executable and KindSymlink/
+// SymlinkTarget (see PLAN.md's "File mode and symlinks — concrete
+// scope"): still pre-release at the time of the bump, so this is an
+// in-place change, not a new dispatched version — the old value 1 is
+// simply no longer recognized.
+const patchFormatVersion byte = 2
 
 // Patch is one immutable, content-addressed unit of history: a set of
 // per-file graph operations, plus the patches whose effects those ops
@@ -165,7 +190,9 @@ func (p *Patch) SignablePayload() []byte {
 		writeString(&buf, fc.Path)
 		buf.WriteByte(byte(fc.Kind))
 		writeBool(&buf, fc.TrailingNewline)
+		writeBool(&buf, fc.Executable)
 		buf.Write(fc.Blob[:])
+		writeString(&buf, fc.SymlinkTarget)
 		writeInt64(&buf, int64(len(fc.Ops)))
 		for _, op := range fc.Ops {
 			buf.WriteByte(byte(op.Kind))
@@ -277,9 +304,17 @@ func Decode(data []byte) (*Patch, error) {
 		if err != nil {
 			return nil, fmt.Errorf("patch: decode change %d trailing newline: %w", i, err)
 		}
+		executable, err := readBool(r)
+		if err != nil {
+			return nil, fmt.Errorf("patch: decode change %d executable: %w", i, err)
+		}
 		var blob Hash
 		if _, err := io.ReadFull(r, blob[:]); err != nil {
 			return nil, fmt.Errorf("patch: decode change %d blob: %w", i, err)
+		}
+		symlinkTarget, err := readString(r)
+		if err != nil {
+			return nil, fmt.Errorf("patch: decode change %d symlink target: %w", i, err)
 		}
 		nOps, err := readCount(r, fmt.Sprintf("patch: decode change %d op count", i))
 		if err != nil {
@@ -313,7 +348,9 @@ func Decode(data []byte) (*Patch, error) {
 			Path:            path,
 			Kind:            ChangeKind(kindByte),
 			TrailingNewline: trailingNewline,
+			Executable:      executable,
 			Blob:            blob,
+			SymlinkTarget:   symlinkTarget,
 			Ops:             ops,
 		})
 	}

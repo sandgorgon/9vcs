@@ -181,7 +181,26 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 		if !existed && ignore.matches(p) {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(r.root, filepath.FromSlash(p)))
+		full := filepath.Join(r.root, filepath.FromSlash(p))
+		info, err := os.Lstat(full)
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", p, err)
+		}
+
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(full)
+			if err != nil {
+				return nil, fmt.Errorf("reading symlink %s: %w", p, err)
+			}
+			if existed && prior.Kind == patches.KindSymlink && prior.SymlinkTarget == target {
+				continue // unchanged
+			}
+			out[p] = patches.FileChange{Path: p, Kind: patches.KindSymlink, SymlinkTarget: target}
+			continue
+		}
+
+		executable := info.Mode()&0o111 != 0
+		content, err := os.ReadFile(full)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", p, err)
 		}
@@ -191,10 +210,10 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 			if err != nil {
 				return nil, fmt.Errorf("storing blob for %s: %w", p, err)
 			}
-			if existed && prior.Kind == patches.KindBlob && prior.Blob == hash {
+			if existed && prior.Kind == patches.KindBlob && prior.Blob == hash && prior.Executable == executable {
 				continue // unchanged
 			}
-			out[p] = patches.FileChange{Path: p, Kind: patches.KindBlob, Blob: hash}
+			out[p] = patches.FileChange{Path: p, Kind: patches.KindBlob, Blob: hash, Executable: executable}
 			continue
 		}
 
@@ -209,11 +228,11 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 			ops = append(ops, patches.Resolve(forks, finalLines)...)
 		}
 		unchanged := existed && prior.Kind == patches.KindText && len(forks) == 0 &&
-			len(ops) == 0 && prior.TrailingNewline == trailing
+			len(ops) == 0 && prior.TrailingNewline == trailing && prior.Executable == executable
 		if unchanged {
 			continue
 		}
-		out[p] = patches.FileChange{Path: p, Kind: patches.KindText, Ops: ops, TrailingNewline: trailing}
+		out[p] = patches.FileChange{Path: p, Kind: patches.KindText, Ops: ops, TrailingNewline: trailing, Executable: executable}
 	}
 
 	for p := range base {
@@ -235,6 +254,30 @@ func writeWorkingTree(r *repo, old, new patches.Index) error {
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return err
 		}
+
+		if st.Kind == patches.KindSymlink {
+			// A plain os.Symlink would fail outright if a regular file
+			// (or a stale symlink to something else) already sits here —
+			// clear it first. ENOENT (nothing there yet) is fine.
+			if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("clearing %s before creating symlink: %w", p, err)
+			}
+			if err := os.Symlink(st.SymlinkTarget, full); err != nil {
+				return fmt.Errorf("creating symlink %s: %w", p, err)
+			}
+			continue
+		}
+		// If a symlink currently occupies this path and the new content
+		// isn't itself a symlink, remove it first — os.WriteFile would
+		// otherwise follow it and clobber whatever it points to, quite
+		// possibly outside the repo entirely, instead of replacing the
+		// tracked path.
+		if fi, err := os.Lstat(full); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			if err := os.Remove(full); err != nil {
+				return fmt.Errorf("removing stale symlink at %s: %w", p, err)
+			}
+		}
+
 		var content []byte
 		switch st.Kind {
 		case patches.KindBlob:
@@ -247,8 +290,21 @@ func writeWorkingTree(r *repo, old, new patches.Index) error {
 			lines, _ := patches.Linearize(st.Graph)
 			content = []byte(joinLines(lines, st.TrailingNewline))
 		}
-		if err := os.WriteFile(full, content, 0o644); err != nil {
+		mode := os.FileMode(0o644)
+		if st.Executable {
+			mode = 0o755
+		}
+		if err := os.WriteFile(full, content, mode); err != nil {
 			return err
+		}
+		// os.WriteFile's mode argument only applies when it actually
+		// creates the file — POSIX open(2) leaves an existing file's
+		// permission bits untouched even with O_CREAT — so an existing
+		// path (the common case: checkout overwriting what's already
+		// there) needs an explicit chmod or a toggled executable bit
+		// would silently fail to take effect.
+		if err := os.Chmod(full, mode); err != nil {
+			return fmt.Errorf("setting mode for %s: %w", p, err)
 		}
 	}
 	for p := range old {

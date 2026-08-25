@@ -294,6 +294,90 @@ signing, wrong-key, unsigned), and format-byte rejection
 cover the same over a real 9P connection, confirming a forged claim is
 refused before ever being stored under any hash.
 
+#### File mode and symlinks — concrete scope (2026-08-25, built)
+
+The gap: `FileChange`/`PathState` tracked line content and whole-file
+blobs, but nothing about a file's executable bit, and `workingFiles`
+(`cmd/9vcs/repo.go`) excluded symlinks from the working-tree walk
+outright — so a symlink was invisible to `record`/`diff`/`status`
+entirely, and checking out an executable script from a peer silently
+dropped the bit (`writeWorkingTree` always wrote `0o644`). Identified by
+directly checking the codebase rather than assuming, while assessing
+whether the patch/bundle format was stable enough to tag a first
+release — it wasn't yet, so this shipped before that tag, as an in-place
+format change rather than triggering real version-dispatch machinery
+(see `patchFormatVersion`'s doc comment: that trigger needs *both* a
+formal release *and* a subsequent change after it — only the second half
+was true here).
+
+**Format change: `patchFormatVersion` 1 → 2.** `FileChange`/`PathState`
+both gained `Executable bool` (meaningful for `KindText`/`KindBlob`
+only — a symlink's own mode bits are POSIX-meaningless) and a new
+`KindSymlink` with `SymlinkTarget string` (stored as a plain string, not
+blob-addressed — a target is a handful of bytes, not file content worth
+a separate content-addressed entry). `Encode`/`Decode` updated in
+lockstep, pinned by `TestEncodeDecodeRoundTripExecutableAndSymlink`.
+
+**Where it touches, methodically enumerated before writing anything** —
+every non-test file referencing `ChangeKind` was checked, not assumed
+safe:
+- `workingFiles` (`repo.go`) now includes symlink entries, not just
+  regular files — `filepath.WalkDir` already doesn't follow a symlink to
+  see what it points at, so this needed no other change.
+- `changedFiles` (`workingtree.go`) `Lstat`s each path first: a symlink
+  short-circuits to a `KindSymlink` change via `os.Readlink`; otherwise
+  the executable bit is read alongside content as before.
+- `writeWorkingTree` creates real symlinks (`os.Symlink`, clearing
+  whatever's there first) and restores the executable bit via
+  `os.Chmod` after writing.
+- `computeMerge` (`mergeutil.go`) treats a symlink-target disagreement
+  as an atomic conflict exactly like a binary one — same "keep ours,
+  flag it" policy — but reports it as its own `"symlink"` kind rather
+  than reusing `"binary"`, since the conflict message lists every
+  differing target inline (a target is a short, readable string) rather
+  than needing `"binary"`'s comparison-sidecar file.
+- `record.go`'s modify/delete-conflict resolution, `diffRefs`,
+  `renderDiff`, `rename.go`'s `renameCandidate`, and `log.go`'s
+  per-change summary all gained explicit symlink/executable handling —
+  each was individually a plausible place for a symlink or an
+  exec-bit-only change to either crash, get silently dropped, or render
+  wrong, not just add a case for completeness.
+- Rename detection treats a symlink exactly like a binary blob: an exact
+  target match is a detected rename; a symlink retargeted in the same
+  change it was renamed in is not (matching the "no partial similarity
+  metric for opaque content" policy blobs already had).
+
+**Two real bugs, both caught by dedicated regression tests before this
+was called done — not found by accident:**
+1. `changedFiles`/`diffRefs`'s "unchanged" checks compared only content
+   (blob hash, or line ops + trailing newline) — never `Executable`. A
+   bare `chmod +x` with no other edit would have been completely
+   invisible to `record`/`diff`/`status`, despite the field existing and
+   encoding correctly. Fixed by adding `Executable` to every unchanged
+   comparison; pinned by
+   `TestChangedFilesExecutableOnlyChangeIsDetected`.
+2. `os.WriteFile`'s mode argument only applies when it actually creates
+   the file — POSIX `open(2)` leaves an already-existing file's
+   permission bits untouched — so `writeWorkingTree` overwriting an
+   *already-checked-out* path (the ordinary case: switching branches,
+   not a fresh checkout) would silently fail to actually toggle the
+   executable bit. Fixed with an explicit `os.Chmod` after every write;
+   pinned by `TestWriteWorkingTreeSetsExecutableBitOnExistingFile`.
+
+**Verified live** with the real binary, not just `go test`: recorded an
+executable script, a symlink, and a plain file in one patch (`status`/
+`log` showed all three correctly, including the `(symlink)` and
+`(executable)` annotations); deleted everything, recorded the deletion,
+and checked out the prior hash from scratch — the script came back
+executable and the symlink came back as a real symlink pointing at the
+right target, not regenerated content. A real three-way symlink conflict
+correctly reported `CONFLICT (symlink)` with the other side's target
+listed, kept "ours," and `merge -abort` correctly restored the
+pre-conflict target. Switching back and forth between two real branches
+that differ only in one file's executable bit correctly flipped the bit
+each direction, on the same already-existing path — the exact scenario
+bug 2 above would have silently gotten wrong.
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:

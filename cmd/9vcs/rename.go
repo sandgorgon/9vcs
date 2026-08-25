@@ -111,6 +111,15 @@ func renameCandidate(oldPath string, oldSt patches.PathState, newPath string, ne
 			return 0, renamePair{}, false
 		}
 		return 1.0, renamePair{oldPath: oldPath, newPath: newPath, oldState: oldSt, newKind: patches.KindBlob, newBlob: newFc.Blob, modified: false}, true
+	case patches.KindSymlink:
+		// Same exact-match-only policy as KindBlob: a symlink retargeted
+		// during the same change it was renamed in isn't detected as a
+		// rename — there's no meaningful partial-similarity metric for a
+		// target string the way there is for line content.
+		if oldSt.SymlinkTarget != newFc.SymlinkTarget {
+			return 0, renamePair{}, false
+		}
+		return 1.0, renamePair{oldPath: oldPath, newPath: newPath, oldState: oldSt, newKind: patches.KindSymlink, modified: false}, true
 	default: // KindText
 		oldLines := linesOf(oldSt)
 		newContent := insertedContent(newFc.Ops)

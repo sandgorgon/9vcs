@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
@@ -162,6 +163,8 @@ func cmdMerge(args []string) error {
 			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", c.Path, binaryConflictSidecar(c.Path, theirs))
 		case "modify/delete":
 			fmt.Printf("  CONFLICT (modify/delete): %s — deleted by %s, modified by the other side; kept the modified version\n", c.Path, c.DeletedBy)
+		case "symlink":
+			fmt.Printf("  CONFLICT (symlink): %s — kept your target; other target(s): %s\n", c.Path, strings.Join(c.OtherTargets, ", "))
 		default:
 			fmt.Printf("  CONFLICT: %s\n", c.Path)
 		}

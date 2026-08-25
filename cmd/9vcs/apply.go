@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
@@ -184,6 +185,8 @@ func cmdApply(args []string) error {
 			fmt.Printf("  CONFLICT (binary): %s — kept your version; see sidecar file(s) for comparison\n", c.Path)
 		case "modify/delete":
 			fmt.Printf("  CONFLICT (modify/delete): %s — deleted by %s, modified elsewhere; kept the modified version\n", c.Path, c.DeletedBy)
+		case "symlink":
+			fmt.Printf("  CONFLICT (symlink): %s — kept your target; other target(s): %s\n", c.Path, strings.Join(c.OtherTargets, ", "))
 		default:
 			fmt.Printf("  CONFLICT: %s\n", c.Path)
 		}

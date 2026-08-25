@@ -74,8 +74,10 @@ func cmdLog(args []string) error {
 			switch fc.Kind {
 			case patches.KindDelete:
 				fmt.Printf("    %s (deleted)\n", fc.Path)
+			case patches.KindSymlink:
+				fmt.Printf("    %s -> %s (symlink)\n", fc.Path, fc.SymlinkTarget)
 			case patches.KindBlob:
-				fmt.Printf("    %s (binary)\n", fc.Path)
+				fmt.Printf("    %s (binary%s)\n", fc.Path, executableSuffix(fc.Executable))
 			default:
 				ins, del := 0, 0
 				for _, op := range fc.Ops {
@@ -86,10 +88,17 @@ func cmdLog(args []string) error {
 						del++
 					}
 				}
-				fmt.Printf("    %s (+%d -%d)\n", fc.Path, ins, del)
+				fmt.Printf("    %s (+%d -%d%s)\n", fc.Path, ins, del, executableSuffix(fc.Executable))
 			}
 		}
 		fmt.Println()
 	}
 	return nil
+}
+
+func executableSuffix(executable bool) string {
+	if executable {
+		return ", executable"
+	}
+	return ""
 }
