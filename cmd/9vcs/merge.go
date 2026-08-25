@@ -154,6 +154,8 @@ func cmdMerge(args []string) error {
 	fmt.Println("automatic merge failed; fix conflicts, then run `9vcs record` to finish:")
 	for _, c := range conflicts {
 		switch c.Kind {
+		case "text":
+			fmt.Printf("  CONFLICT (text): %s — resolve the <<<<<<< / ======= / >>>>>>> markers in the file, then record\n", c.Path)
 		case "binary":
 			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", c.Path, binaryConflictSidecar(c.Path, theirs))
 		case "modify/delete":
