@@ -1354,48 +1354,35 @@ used to say:
 
 ## Open items to revisit
 
-- Bundle export/import and `apply` (decision #8: signed, offline patch
-  exchange, plus true N-way selective integration) are both now built —
-  see Status. The previously-open question on `apply` (auto-record
-  between pairwise merges, or a true N-way merge patch) is resolved: a
-  true N-way merge patch, once it turned out the graph/conflict
-  machinery (`Linearize`/`Resolve`) was already N-way and only the
-  CLI-facing `computeMerge`/`MERGE_HEAD` layer needed generalizing from
-  two sides to N. The optional live `/offers` variant (decision #8,
-  `propose` permission tier) is now built and verified live too — see
-  Status. That closes out decision #8 entirely: bundle export/import,
-  `apply`, and `/offers` are all built.
-- `Patch.Author` end to end is now fully built: Tier 1 (configurable
-  `user.name`/`user.email`, no wire format change) and
-  `AuthorFingerprint`/`AuthorSignature` (real per-patch signing verified
-  on every ingestion path) — see Status for both. Signing was originally
-  scoped as deferred/informational-only ("not worth it while solo"),
-  then revised the same day once the user set real multi-user adoption
-  as this project's explicit baseline assumption from here on — design
-  going forward should assume patches are authored by multiple real,
-  independent identities and shared/relayed between them, not default to
-  solo-use simplifications; see decision #1's subsection for the full
-  reasoning. Real multi-version patch-encoding dispatch was also built
-  that same day and then deliberately removed again — pre-release, with
-  one user and no data anywhere depending on the format staying stable,
-  it protected a property nothing needed yet; a single `patchFormatVersion`
-  tripwire byte was kept instead. Revisit real dispatch only once *both*
-  a formal release exists *and* the encoding needs to change again after
-  it — not either alone. `bundle.Bundle.Store` now also verifies each
-  patch's own `AuthorFingerprint`/`AuthorSignature` before persisting
-  anything (all-or-nothing — a forged claim anywhere in the bundle
-  refuses the whole import), independent of the bundle's own signer
-  signature checked by `Bundle.Verify` — this closed a real gap where
-  bundle import had been built without it. The import/reconcile
-  cross-check against the TLS-verified peer's own fingerprint (floated
-  as deferred UX in decision #1's Author identity subsection) is now
-  built too — see Status.
-- iOS build: checked from this Linux dev environment, and it cannot be
-  done here — not a gap in this codebase (neither it nor
-  `sandgorgon/9p` uses cgo, confirmed by grepping both for `import
-  "C"`), but a hard Go toolchain constraint: `GOOS=ios` always requires
-  external (cgo) linking regardless of whether the program itself uses
-  cgo, and satisfying that needs `clang` plus Apple's iOS SDK, which
-  ships only via Xcode — there's no Linux-hosted iOS SDK to install.
-  Still genuinely unverified; just needs an actual macOS host with
-  Xcode to attempt `GOOS=ios GOARCH=arm64 CGO_ENABLED=1 go build`.
+Every decision-#1–#8 design item this section used to track (bundle
+export/import, `apply`, `/offers`, both tiers of `Patch.Author`, real
+multi-version encoding dispatch) is built — see Status for each. What's
+actually left:
+
+- **iOS build: still genuinely unverified.** Checked from this Linux dev
+  environment and it cannot be attempted here — not a gap in this
+  codebase (neither it nor `sandgorgon/9p` uses cgo, confirmed by
+  grepping both for `import "C"`), but a hard Go toolchain constraint:
+  `GOOS=ios` always requires external (cgo) linking regardless of
+  whether the program itself uses cgo, and satisfying that needs `clang`
+  plus Apple's iOS SDK, which ships only via Xcode — no Linux-hosted iOS
+  SDK exists to install. Needs an actual macOS host with Xcode to attempt
+  `GOOS=ios GOARCH=arm64 CGO_ENABLED=1 go build`.
+- **Windows: also unverified**, same shape of gap as iOS but lower risk —
+  everything in this codebase and `sandgorgon/9p` is pure Go/stdlib-only
+  with careful `filepath.FromSlash`/`ToSlash` use throughout, so it
+  should build and run unmodified, but "should" isn't "verified." Needs
+  an actual Windows host to confirm.
+- **No release/versioning process yet.** Every "pre-release, one user,
+  no format-compatibility concerns" argument used throughout this
+  document (decision #1's format-version tripwire byte being kept
+  minimal instead of building real dispatch, most notably) stops holding
+  once a first tagged release exists and other installs have real,
+  depended-upon data. Not urgent while it's still just this repo's own
+  history, but worth deciding deliberately (a version scheme, a
+  CHANGELOG, what "1.0" would even mean for a patch-theory VCS) before
+  it happens by accident.
+- **Required PR reviewer count is 0.** Branch protection requires a PR
+  and a passing CI check, but not a second approval — reasonable while
+  it's mostly one person, worth raising once there's more than one
+  regular contributor so a change doesn't only ever get self-reviewed.
