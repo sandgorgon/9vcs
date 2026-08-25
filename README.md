@@ -16,14 +16,29 @@ See [Vocabulary](#vocabulary-cheat-sheet) below for the equivalents.
 - That's it — `9vcs` and the `9p` library it's built on are pure Go,
   stdlib-only. No daemon, no database, no external services.
 
-## Build
+## Install
+
+Grab a prebuilt binary from the
+[Releases page](https://github.com/sandgorgon/9vcs/releases) — each
+release has `.tar.gz`s for `linux/amd64`, `linux/arm64`,
+`darwin/arm64`, and `darwin/amd64`, plus a `.sha256` to verify against:
+
+```
+curl -LO https://github.com/sandgorgon/9vcs/releases/download/<tag>/9vcs_<tag>_linux_amd64.tar.gz
+tar xzf 9vcs_<tag>_linux_amd64.tar.gz
+```
+
+That unpacks a directory with the `9vcs` binary, `LICENSE`, and this
+`README.md`. Put the binary somewhere on your `PATH`.
+
+Or build from source:
 
 ```
 go build -o 9vcs ./cmd/9vcs
 ```
 
-Put the resulting binary somewhere on your `PATH`. Every command below
-assumes it's just called `9vcs`.
+Either way, every command below assumes the binary is just called
+`9vcs`.
 
 ## Quickstart: working alone
 
