@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"fmt"
 	"os"
 	"os/user"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sandgorgon/9vcs/identity"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -47,6 +49,26 @@ func formatAuthor(name, email string) string {
 		return u.Username
 	}
 	return "unknown"
+}
+
+// signPatch signs patch with this install's identity, in place, before
+// record stores it: sets AuthorFingerprint to the public key and
+// AuthorSignature over patch.SignablePayload(). identity.Load() failing
+// (permissions, disk full, whatever) leaves patch unsigned — a warning
+// on stderr, not a failed record. record is the single most-invoked
+// command; blocking it on an unrelated identity problem for a field
+// that's opportunistic, not required, would be a real regression. An
+// unsigned patch is a fully legitimate state — see
+// Patch.VerifyAuthorSignature.
+func signPatch(patch *patches.Patch) {
+	id, err := identity.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: recording unsigned (identity unavailable): %v\n", err)
+		return
+	}
+	copy(patch.AuthorFingerprint[:], id.Key.Public().(ed25519.PublicKey))
+	sig := ed25519.Sign(id.Key, patch.SignablePayload())
+	copy(patch.AuthorSignature[:], sig)
 }
 
 // binaryProbeBytes caps how much of a file isBinary inspects, matching

@@ -82,41 +82,32 @@ only), or the OS-username fallback (neither set). Zero per-patch
 friction — configured once, read silently by every `record` after that,
 same as `git config user.name`/`user.email`.
 
-**Tier 2 — informational `AuthorFingerprint` (real format change).**
-`Patch` gains a new field: the recording install's existing Ed25519
-public key (`identity.Load().Key.Public()`), stored as a raw 32 bytes —
-same fixed-size-array treatment `Hash` already gets, not the hex string —
-so `log`/`bundle show` hex-encode it for display via `identity.Fingerprint`
-only at print time. Populated automatically at `record`, no user input.
+**Tier 2 — `AuthorFingerprint` + `AuthorSignature`, actually verified
+(real format change).** Revised 2026-08-24: the user stated 9vcs is meant
+for real multi-user adoption, not solo-only use, as an explicit design
+assumption from here on — see PLAN.md's "Status"/Open items and the
+project's multiuser-goal memory. That reverses the reasoning an earlier
+version of this subsection used ("informational only... not worth
+signing while solo, no second identity to correlate against"): the whole
+value of per-patch provenance — telling a genuine author from a forged
+claim, and having that survive a patch being relayed through more than
+one hop — only exists once more than one identity is actually in play,
+which is now the assumed baseline, not a hypothetical. Tier 2 is
+therefore scoped as real signing from the start, not an unsigned
+stepping stone — see the dedicated subsection below.
 
-What this buys, and what it doesn't: it's self-reported and unsigned, so
-it's not proof of anything on its own — someone could hand-edit it before
-a patch is ever transmitted. Its real value shows up specifically on the
-`import`/`reconcile` path, where a patch already arrives over a
-TLS-authenticated connection (decision #7): the fetched patch's own
-`AuthorFingerprint` can be compared against the fingerprint the
-connection itself already verified, a free "did this peer actually
-author what they're sending, or relay someone else's patch" signal —
-informational only (relaying is normal, e.g. pulling through a shared
-hub), not a refusal. Exact UX for surfacing a mismatch (silent, a `log`
-annotation, an explicit flag) is still open — default to *not* warning,
-since relaying is the common case and a naive warning would just be
-noise.
-
-**Open question this tier forces, not resolved here**: `Patch.Encode()`/
-`Decode()` have no version discriminator today — adding a field changes
-the byte layout for every patch, and existing on-disk patches (already
-fixed to their old hash, immutable) won't parse against a `Decode` that
-expects a field they don't have. Since no repo outside this dev/test
-environment exists yet, the cheapest option is just accepting the
-breaking bump (`9vcs init` fresh). The other option — prefixing
-`Encode()`'s output with an explicit version byte now — costs little and
-means the *next* format change (e.g. full per-patch signing, deliberately
-not scoped here — see the "what do I gain" discussion: no per-patch
-non-repudiation without it, but real cost to the content-addressing
-format, not worth it while solo) doesn't hit the same wall twice. Leaning
-towards adding the version byte now, precisely because this is visibly
-the second time this question has come up.
+**Format-compatibility question, resolved simple.** Adding fields changes
+the byte layout for every patch, and this project is pre-release — one
+person, no data anywhere that depends on the format staying stable, so
+there's nothing to preserve compatibility with yet. Rather than building
+real multi-version dispatch prematurely, `Patch.Encode()` just gained one
+leading `patchFormatVersion` byte that `Decode` checks and refuses to
+misparse past — cheap insurance against a silent misparse, not an attempt
+at supporting multiple format versions. Real version dispatch is a
+decision to make once there's a formal release and therefore real data
+whose compatibility actually matters — see the dedicated subsection
+below for the full reasoning (including what got built and then
+deliberately removed once this was clarified).
 
 #### Config file format for user.name/email — concrete scope (2026-08-24, not yet built)
 
@@ -177,148 +168,131 @@ as already described. The one ripple: `record.go`'s call site changes
 from `Author: author()` to `Author: author(r)` — `r` is already in scope
 there.
 
-#### Patch encoding version byte — concrete scope (2026-08-24, not yet built)
+#### AuthorFingerprint + AuthorSignature, single-format (built 2026-08-24)
 
-**The mechanism.** `Encode()` writes one new leading byte before anything
-else; `Decode()` reads it first and dispatches on it:
+Built, then deliberately simplified the same day once the underlying
+assumption was corrected: this project is pre-release with exactly one
+person using it, so there's no real data anywhere that a format change
+needs to keep decoding — see "Why no real multi-version support yet"
+below. What shipped is real per-patch signing without the multi-version
+dispatch machinery that would matter once a release actually exists.
+
+**Why bundle-level and TLS-peer-level trust aren't enough on their own.**
+Decision #8's (unbuilt) bundle signature and decision #7's TLS peer auth
+both only establish *who handed you this patch*, not *who wrote it*, once
+more than two people are involved — a relayed bundle, a shared hub
+re-serving other contributors' patches, a peer that's honest about its
+own patches but merely forwarding someone else's. In every one of those,
+the transport-level guarantee covers only the most recent hop. Only a
+**signature that travels with the patch itself**, checked independently
+of transport, makes authorship survive being relayed — the scenario that
+matters once this is actually shared between people instead of staying
+on one machine, which is now this project's explicit baseline assumption
+(see the note at the top of the Author identity subsection above).
+
+**Fields.** `Patch` carries `AuthorFingerprint [32]byte` (the recording
+install's raw Ed25519 public key — not the hex string, same fixed-size
+treatment `Hash` already gets) and `AuthorSignature [64]byte` (an Ed25519
+signature over everything else in the encoding). Both all-zero together
+means "unsigned" — a real Ed25519 key/signature pair is never all-zero,
+so the zero value is unambiguous — and that's a fully legitimate,
+accepted state (see Verification), not an error: this is opportunistic
+signing, never a hard requirement that could turn a missing identity into
+a blocked `record`.
+
+**Why no real multi-version support yet.** An earlier pass at this built
+actual dual-format dispatch — a `patchEncodingV1`/`patchEncodingV2` split,
+a sticky per-`Patch` `version` field, `decodeV1Fields` factored out as a
+subroutine both versions' decoders shared — all in service of one
+property: re-`Encode`ing a `Decode`'d patch must always reproduce its
+original bytes, so a future format change can't silently break
+`fetchPatch`/`vcsfs`'s hash re-check for patches that predate it. That
+property only matters once there's a second version of the format for
+some patch to have predated — which requires a release with real,
+depended-upon data. Pre-release, that never happens: there's one person,
+one format, and every existing patch anywhere is disposable test data.
+Carrying the dispatch machinery bought nothing yet and cost real
+complexity, so it came back out. What's kept: a single leading
+`patchFormatVersion` byte, always the same value, that `Decode` checks
+and refuses to misparse past — cheap insurance for the day this format
+does need to change out from under existing data, at effectively zero
+cost today. **When a formal release happens**, that's the trigger to
+reintroduce real version dispatch for the *next* format change from that
+point on — this subsection's git history is a working example of what
+that refactor looks like when it's actually needed.
+
+**What `AuthorSignature` actually signs.** Everything the encoding
+contains *except* the signature itself — the format byte,
+`Dependencies`/`Author`/`Time`/`Message`/`Changes`, and
+`AuthorFingerprint` — via `SignablePayload()`, kept as its own method
+(not inlined into `Encode`) specifically so `Encode` stays a pure
+serializer with no key-material dependency; signing happens exactly
+once, explicitly, in `cmd/9vcs/record.go`'s new `signPatch`
+(`workingtree.go`), after constructing the patch and before `store.Put`:
 
 ```go
-const patchEncodingV1 byte = 1 // today's exact field set, just now version-tagged
-
-type Patch struct {
-    version byte // set by Decode to whatever it read; 0 means "freshly
-                 // constructed in this process, not yet round-tripped" —
-                 // Encode() then falls back to the newest version this
-                 // build knows, patchEncodingV1 today
-    Dependencies []Hash
-    Author       string
-    Time         time.Time
-    Message      string
-    Changes      []FileChange
-}
-
-func (p *Patch) Encode() []byte {
-    v := p.version
-    if v == 0 {
-        v = patchEncodingV1 // bump this constant when a new field lands
+func signPatch(patch *patches.Patch) {
+    id, err := identity.Load()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "warning: recording unsigned (identity unavailable): %v\n", err)
+        return
     }
-    var buf bytes.Buffer
-    buf.WriteByte(v)
-    // ...unchanged today's field-by-field writes...
-}
-
-func Decode(data []byte) (*Patch, error) {
-    r := bytes.NewReader(data)
-    v, err := r.ReadByte()
-    ...
-    switch {
-    case v == patchEncodingV1:
-        return decodeV1(r, v) // today's exact Decode body, unchanged
-    case v > patchEncodingV1:
-        return nil, fmt.Errorf("patch: encoding version %d is newer than this build understands (max %d) — upgrade 9vcs", v, patchEncodingV1)
-    default: // v == 0, or any other value never issued
-        return nil, fmt.Errorf("patch: unrecognized encoding version %d", v)
-    }
+    copy(patch.AuthorFingerprint[:], id.Key.Public().(ed25519.PublicKey))
+    sig := ed25519.Sign(id.Key, patch.SignablePayload())
+    copy(patch.AuthorSignature[:], sig)
 }
 ```
 
-This is a **flag-day break, not a compatibility shim**: today's raw bytes
-have no leading byte, so the new `Decode` reads whatever byte actually
-comes first — near-certainly `0x00` in practice, since it's the
-big-endian high byte of `len(Dependencies)`, always a small number — and
-that falls straight into the `default` branch, a clear "unrecognized
-encoding version" error instead of a silent misparse. That's deliberate,
-not a gap: with no repo outside this dev/test environment, there's no
-real data to preserve, so failing loudly on old bytes is strictly better
-than either quietly corrupting them or spending effort auto-detecting
-the legacy shape. From this point forward, though, versioning is real:
-`patchEncodingV1` stays decodable forever, and a future `patchEncodingV2`
-(the `AuthorFingerprint` field from the subsection above) only needs its
-own `decodeV2` and a bump to the fallback constant — old patches never
-need touching again.
+`identity.Load()` failing (permissions, disk full, whatever) produces an
+unsigned patch and a stderr warning, never a failed `record` — `record`
+is the single most-invoked command, and nothing else it does today can
+fail this way.
 
-**Why the `version` field has to be sticky per-instance, not just "always
-encode as the newest version"** — this is the one correctness-critical
-detail. `Hash()` is `sha256.Sum256(p.Encode())`, and both call sites that
-matter — `sync.go`'s `fetchPatch` (client pulling a patch from a peer)
-and `vcsfs.go`'s patch-write path (server receiving one) — do the same
-round-trip: `Decode` a peer's raw bytes into a `Patch`, then re-`Encode`
-it (directly via `p.Hash()`, and again inside `Store.Put`) and check the
-result still hashes to the hash it was fetched/pushed under. If `Encode`
-always emitted "whatever the newest version is" regardless of what a
-`Patch` was actually decoded from, re-encoding an old-version patch after
-a future version bump would silently produce different bytes than the
-original — a different hash than the one it's stored and requested
-under — and every historical patch would start failing `fetchPatch`'s
-own integrity check (misreported as "corrupted or untrustworthy
-transfer") the moment the encoding version next changes. Tagging each
-`Patch` with the version it was actually decoded from, and having
-`Encode` honor that tag, is what keeps `fetchPatch`/`vcsfs`'s round-trip
-hash check correct across a version bump — verified by inspection against
-both of those call sites, not yet by a running test.
+**Verification — the actual point of doing this.**
 
-**Test to add**: a round-trip case that decodes a `patchEncodingV1`-tagged
-patch, re-`Encode`s it, and asserts byte-for-byte identity with the
-original — this is the regression that would otherwise only surface the
-next time the encoding version actually bumps, silently, in production
-use rather than in a test.
+```go
+func (p *Patch) VerifyAuthorSignature() bool {
+    if p.AuthorFingerprint == ([32]byte{}) {
+        return true
+    }
+    return ed25519.Verify(p.AuthorFingerprint[:], p.SignablePayload(), p.AuthorSignature[:])
+}
+```
 
-#### AuthorFingerprint (`patchEncodingV2`) — concrete scope (2026-08-24, not yet built)
+Wired into every path that ingests a patch from outside this process —
+`sync.go`'s `fetchPatch` (client pulling via `import`/`reconcile`) and
+`vcsfs.go`'s patch-write path (server receiving a push), both alongside
+their existing `Hash` check but catching a genuinely different thing:
+the hash check proves *these bytes are what's stored under this hash*
+(transit integrity), not that the claimed authorship is real — a
+dishonest peer can craft arbitrary content and correctly self-hash it,
+but cannot produce a valid signature for a fingerprint whose private key
+it doesn't hold. A failed `VerifyAuthorSignature` is refused with the
+same severity as a hash mismatch; an unsigned patch is accepted exactly
+as before. Bundle import (decision #8, still unbuilt) gets the same
+check once it exists — independent of the bundle's own signer signature,
+since a bundle can legitimately carry patches individually signed by
+people other than whoever sent it.
 
-Builds directly on both subsections above — this is `patchEncodingV2`,
-the first real user of the version-byte mechanism.
+**Display.** `cmd/9vcs/log.go` prints a `Fingerprint: ... (verified)` /
+`(INVALID SIGNATURE)` line under `Author:` when `AuthorFingerprint` is
+non-zero, via the same `identity.Fingerprint` call peer auth already
+uses — copy-pasteable against `9vcs identity show` or an
+`authorized-peers`/`known-peers` entry.
 
-**Field.** `AuthorFingerprint [32]byte` on `Patch` — the recording
-install's raw Ed25519 public key (`identity.Load().Key.Public()`), not
-its hex string, matching how `Hash`/`FileChange.Blob` are already stored.
-All-zero means "not set" (a v1 patch decoded before this field existed,
-or a v2 patch whose recorder's identity load failed — see below); a real
-Ed25519 public key is never all-zero, so the zero value is unambiguous.
-
-**Encode/Decode.** `decodeV2` is `decodeV1`'s field parsing (refactored
-into a shared helper both call) plus one trailing `io.ReadFull(r,
-p.AuthorFingerprint[:])`. `encodeV2` is `encodeV1`'s bytes plus
-`buf.Write(p.AuthorFingerprint[:])` appended at the end — appending
-rather than interleaving is what lets `decodeV1` stay untouched as a
-subroutine `decodeV2` builds on, instead of the two versions diverging
-mid-format. `Encode()`'s version dispatch (from the subsection above)
-gains one arm: `patchEncodingV2` once this field exists as the new
-fallback-to-latest constant.
-
-**Population — must not make `record` fragile.** `cmd/9vcs/record.go`'s
-patch construction gains `AuthorFingerprint: authorFingerprint()`, a new
-helper in `workingtree.go` alongside the existing `author()`, which calls
-`identity.Load()` and copies the returned `ed25519.PublicKey` into a
-`[32]byte`. Critically, `identity.Load()`'s failure must **not** fail
-`record` — `record` is the single most-invoked command, and blocking it
-on an unrelated identity/config-directory problem (permissions, disk
-full, whatever) would be a real regression for a field that's purely
-informational. `authorFingerprint()` swallows a load error, prints a
-one-line warning to stderr, and returns the zero value — same "degrade,
-don't block" posture `record` doesn't currently need anywhere else,
-because nothing it does today can fail this way.
-
-**Display.** `cmd/9vcs/log.go`'s per-entry loop prints a `Fingerprint:`
-line under `Author:` when `p.AuthorFingerprint` is non-zero, hex-encoded
-via the exact same `identity.Fingerprint` call peer auth already uses —
-one fingerprint computation, reused everywhere, so a patch's printed
-fingerprint is directly copy-pasteable against `9vcs identity show` or an
-`authorized-peers`/`known-peers` entry, not a parallel notion of
-"fingerprint" that happens to look similar.
-
-**Deliberately deferred, not built alongside this field**: the
-import/reconcile cross-check floated in the Author identity subsection
-above (comparing a fetched patch's `AuthorFingerprint` against the
-already-TLS-verified peer fingerprint at `sync.go`'s `fetchPatch`) needs
-threading the verified peer fingerprint down into `fetchPatch`, which
-today only takes `(c *client.Client, store *patches.Store, hash
-patches.Hash)` — a real but small plumbing change. Leaving it out of this
-pass on purpose: it's a UX decision (silent / logged / flagged) more than
-an encoding one, and doesn't need to land in the same change as the field
-itself. Same goes for the `bundle show`/`import` cross-reference noted
-earlier (does a patch's own `AuthorFingerprint` match the bundle's
-signer, i.e. did the sender author what they're sending, or relay it) —
-natural once both features exist, not before.
+**Verified live**, over real TLS+9P between two distinct identities, not
+just unit/integration tests: peer A records a patch (auto-signed, shows
+`(verified)` in A's `log`); peer B `import`s it from A, and the same
+patch — now materialized against a completely different machine's
+identity — independently re-verifies as `(verified)` on B's side too,
+proving the authorship claim travels with the patch, not just with the
+transport that carried it. Unit tests cover the encode/decode round trip
+(unsigned and signed), signature verification (valid, tampered-after-
+signing, wrong-key, unsigned), and format-byte rejection
+(`objstore/patches/encoding_test.go`); `vcsfs`'s
+`TestPatchWriteForgedAuthorshipRejected`/`TestPatchWriteSignedAuthorshipAccepted`
+cover the same over a real 9P connection, confirming a forged claim is
+refused before ever being stored under any hash.
 
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
@@ -753,9 +727,46 @@ used to say:
   the per-key cascade actually cascades per key, not per file — setting
   global `user.name`/`user.email` while a repo overrides only
   `user.email` locally correctly resolves `user.name` from global and
-  `user.email` from the repo-local file. `AuthorFingerprint`
-  (`patchEncodingV2`) and the version-byte mechanism it needs remain
-  unbuilt — see Open items.
+  `user.email` from the repo-local file.
+- `AuthorFingerprint` + `AuthorSignature`, real per-patch signing: built
+  and verified live, exactly as rescoped under decision #1 once real
+  multi-user adoption became this project's explicit baseline
+  assumption. `objstore/patches/patch.go`'s `Patch` carries both fields;
+  `Encode`/`Decode` are a single current format behind one
+  `patchFormatVersion` tripwire byte, deliberately *not* real
+  multi-version dispatch — this project is pre-release with one user and
+  no data anywhere whose decodability needs protecting yet, so that
+  machinery (built, then removed the same day once this was clarified)
+  would have bought nothing; see decision #1's subsection for the full
+  "why" and the exact trigger for reintroducing it (a formal release,
+  plus an actual subsequent format change — both, not either).
+  `cmd/9vcs/record.go` signs every patch it builds via a new `signPatch`
+  (`workingtree.go`) using this install's existing identity key,
+  degrading to an unsigned patch plus a stderr warning — never a failed
+  `record` — if `identity.Load()` fails, same "don't make the
+  most-invoked command fragile" posture Tier 1 already established.
+  `Patch.VerifyAuthorSignature` is wired into both `sync.go`'s
+  `fetchPatch` and `vcsfs.go`'s write path, refused with the same
+  severity as a hash mismatch on an invalid signature — but, critically,
+  independent of that hash check: hash verification proves the bytes
+  match what was requested, not that the claimed authorship is genuine,
+  which is exactly what a relay forging a patch under someone else's
+  fingerprint would otherwise get away with. `9vcs log` prints a
+  `Fingerprint: ... (verified)` / `(INVALID SIGNATURE)` line via the same
+  `identity.Fingerprint` call peer auth already uses. Verified live
+  end-to-end over real TLS+9P between two distinct identities (not just
+  unit tests): peer A records a patch, which is signed and shows
+  `(verified)` in `9vcs log`; peer B `import`s it from A and the same
+  patch, now materialized on a completely different machine identity,
+  still independently re-verifies as `(verified)` there too — the
+  authorship claim travels with the patch, not just with the transport
+  that carried it, which was the entire point. Unit tests cover the
+  encode/decode round trip (unsigned and signed), signature verification
+  (valid, tampered-after-signing, wrong-key, unsigned), and format-byte
+  rejection; `vcsfs`'s `TestPatchWriteForgedAuthorshipRejected`/
+  `TestPatchWriteSignedAuthorshipAccepted` cover the same over a real 9P
+  connection, confirming a forged claim is refused before it's ever
+  stored under any hash.
 
 ## Open items to revisit
 
@@ -763,14 +774,28 @@ used to say:
   isn't built. Concrete scope (wire format, package layout, CLI surface)
   is now written up under decision #8's "Bundle export/import — concrete
   scope" subsection, as of 2026-08-24 — implementation not started.
-- `Patch.Author` Tier 1 (configurable `user.name`/`user.email`, no wire
-  format change) is built — see Status. Still open: the patch-encoding
-  version byte and the `AuthorFingerprint` field it unblocks
-  (`patchEncodingV2`), both concretely scoped under decision #1 as of
-  2026-08-24 but not yet implemented. Full per-patch signing was
-  considered and deliberately left out of scope entirely (see that
-  subsection) — not worth the content-addressing format cost for a solo
-  install with no second identity to correlate against yet.
+- `Patch.Author` end to end is now fully built: Tier 1 (configurable
+  `user.name`/`user.email`, no wire format change) and
+  `AuthorFingerprint`/`AuthorSignature` (real per-patch signing verified
+  on every ingestion path) — see Status for both. Signing was originally
+  scoped as deferred/informational-only ("not worth it while solo"),
+  then revised the same day once the user set real multi-user adoption
+  as this project's explicit baseline assumption from here on — design
+  going forward should assume patches are authored by multiple real,
+  independent identities and shared/relayed between them, not default to
+  solo-use simplifications; see decision #1's subsection for the full
+  reasoning. Real multi-version patch-encoding dispatch was also built
+  that same day and then deliberately removed again — pre-release, with
+  one user and no data anywhere depending on the format staying stable,
+  it protected a property nothing needed yet; a single `patchFormatVersion`
+  tripwire byte was kept instead. Revisit real dispatch only once *both*
+  a formal release exists *and* the encoding needs to change again after
+  it — not either alone. Not yet built on top of this: the import/reconcile
+  cross-check against the TLS-verified peer's own fingerprint (still
+  floated as deferred UX in decision #1's Author identity subsection —
+  distinct from and additional to the forged-signature refusal that *is*
+  built), and per-patch signing's use inside bundle import once bundles
+  themselves exist.
 - iOS build: checked from this Linux dev environment, and it cannot be
   done here — not a gap in this codebase (neither it nor
   `sandgorgon/9p` uses cgo, confirmed by grepping both for `import

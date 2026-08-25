@@ -5,6 +5,7 @@ package patches
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -106,6 +107,19 @@ type FileChange struct {
 	Blob Hash // KindBlob only: hash of the whole file in the blob store
 }
 
+// patchFormatVersion tags Encode's output so a genuinely incompatible
+// future format change fails Decode loudly instead of misparsing. This
+// project is pre-release with exactly one person using it and no data
+// anywhere that needs to keep decoding across a format change, so this
+// is deliberately just a cheap tripwire, not real multi-version support:
+// there's only ever one recognized value, Decode refuses anything else,
+// and the format is free to change in place as often as needed. Real
+// version dispatch (multiple recognized values, each with its own
+// decode path) is a decision to make once there's a formal release and
+// therefore real data whose compatibility actually matters — see
+// PLAN.md decision #1.
+const patchFormatVersion byte = 1
+
 // Patch is one immutable, content-addressed unit of history: a set of
 // per-file graph operations, plus the patches whose effects those ops
 // assume are already applied. A root patch has no dependencies. A merge
@@ -118,14 +132,27 @@ type Patch struct {
 	Time         time.Time
 	Message      string
 	Changes      []FileChange
+
+	// AuthorFingerprint and AuthorSignature are the recording install's
+	// raw Ed25519 public key and its signature over SignablePayload().
+	// Both all-zero means unsigned — a legitimate state (e.g. the
+	// recorder had no usable identity at record time), not an error; see
+	// VerifyAuthorSignature.
+	AuthorFingerprint [32]byte
+	AuthorSignature   [64]byte
 }
 
-// Encode produces a canonical, deterministic byte representation of p,
-// suitable for hashing. Changes and their Ops are expected to already be in
-// a stable order (callers sort by Path; ops are emitted in graph order by
-// the differ).
-func (p *Patch) Encode() []byte {
+// SignablePayload is everything Encode writes except AuthorSignature
+// itself: the format byte, Dependencies/Author/Time/Message/Changes, and
+// AuthorFingerprint. cmd/9vcs/record.go signs this when it first builds
+// a Patch; VerifyAuthorSignature checks against it. Splitting this out
+// of Encode keeps Encode a pure serializer with no key-material
+// dependency — signing happens exactly once, explicitly, at record time.
+// Changes and their Ops are expected to already be in a stable order
+// (callers sort by Path; ops are emitted in graph order by the differ).
+func (p *Patch) SignablePayload() []byte {
 	var buf bytes.Buffer
+	buf.WriteByte(patchFormatVersion)
 	writeInt64(&buf, int64(len(p.Dependencies)))
 	for _, d := range p.Dependencies {
 		buf.Write(d[:])
@@ -148,12 +175,36 @@ func (p *Patch) Encode() []byte {
 			writeString(&buf, op.Content)
 		}
 	}
+	buf.Write(p.AuthorFingerprint[:])
+	return buf.Bytes()
+}
+
+// Encode produces a canonical, deterministic byte representation of p,
+// suitable for hashing and storage — the on-disk/wire format.
+func (p *Patch) Encode() []byte {
+	buf := bytes.NewBuffer(p.SignablePayload())
+	buf.Write(p.AuthorSignature[:])
 	return buf.Bytes()
 }
 
 // Hash returns the content hash of p's canonical encoding.
 func (p *Patch) Hash() Hash {
 	return sha256.Sum256(p.Encode())
+}
+
+// VerifyAuthorSignature reports whether p's authorship claim is
+// internally consistent: true if p is unsigned (AuthorFingerprint is
+// all-zero — no claim made, nothing to check), true if it's signed and
+// the signature genuinely matches, false only when a fingerprint is
+// present but the signature doesn't verify against it — a forged or
+// corrupted authorship claim. Callers that ingest a patch from outside
+// this process (sync.go's fetchPatch, vcsfs.go's patch-write path) treat
+// false the same as a Hash mismatch: refuse the transfer.
+func (p *Patch) VerifyAuthorSignature() bool {
+	if p.AuthorFingerprint == ([32]byte{}) {
+		return true
+	}
+	return ed25519.Verify(p.AuthorFingerprint[:], p.SignablePayload(), p.AuthorSignature[:])
 }
 
 // Normalize puts Changes and Dependencies into the canonical order
@@ -166,11 +217,22 @@ func (p *Patch) Normalize() {
 	})
 }
 
-// Decode parses the canonical encoding produced by Encode. The encoding is
-// self-delimiting (length-prefixed fields in fixed order), so it doubles as
-// the on-disk storage format — no separate serialization needed.
+// Decode parses the canonical encoding Encode produces. The leading byte
+// must be patchFormatVersion — pre-release, a mismatch means stale data
+// from before an in-place format change, not a different peer version to
+// dispatch on (see patchFormatVersion's doc comment). Everything after
+// it is self-delimiting (length-prefixed fields in fixed order), so it
+// doubles as the on-disk storage format — no separate serialization
+// needed.
 func Decode(data []byte) (*Patch, error) {
 	r := bytes.NewReader(data)
+	v, err := r.ReadByte()
+	if err != nil {
+		return nil, fmt.Errorf("patch: decode format byte: %w", err)
+	}
+	if v != patchFormatVersion {
+		return nil, fmt.Errorf("patch: unrecognized format byte %d (want %d) — pre-release, so this is almost certainly stale data from before a format change, not a version to support", v, patchFormatVersion)
+	}
 	p := &Patch{}
 	nDeps, err := readInt64(r)
 	if err != nil {
@@ -225,7 +287,7 @@ func Decode(data []byte) (*Patch, error) {
 		}
 		ops := make([]LineOp, 0, nOps)
 		for j := int64(0); j < nOps; j++ {
-			kindByte, err := r.ReadByte()
+			opKindByte, err := r.ReadByte()
 			if err != nil {
 				return nil, fmt.Errorf("patch: decode change %d op %d kind: %w", i, j, err)
 			}
@@ -245,7 +307,7 @@ func Decode(data []byte) (*Patch, error) {
 			if err != nil {
 				return nil, fmt.Errorf("patch: decode change %d op %d content: %w", i, j, err)
 			}
-			ops = append(ops, LineOp{Kind: OpKind(kindByte), ID: id, Prev: prev, Next: next, Content: content})
+			ops = append(ops, LineOp{Kind: OpKind(opKindByte), ID: id, Prev: prev, Next: next, Content: content})
 		}
 		p.Changes = append(p.Changes, FileChange{
 			Path:            path,
@@ -254,6 +316,12 @@ func Decode(data []byte) (*Patch, error) {
 			Blob:            blob,
 			Ops:             ops,
 		})
+	}
+	if _, err := io.ReadFull(r, p.AuthorFingerprint[:]); err != nil {
+		return nil, fmt.Errorf("patch: decode author fingerprint: %w", err)
+	}
+	if _, err := io.ReadFull(r, p.AuthorSignature[:]); err != nil {
+		return nil, fmt.Errorf("patch: decode author signature: %w", err)
 	}
 	return p, nil
 }

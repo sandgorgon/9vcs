@@ -392,6 +392,17 @@ func (f *writeFile) Close() error {
 		if err != nil {
 			return fmt.Errorf("vcsfs: invalid patch content for %s: %w", f.want, err)
 		}
+		// A different check from the got != f.want comparison below:
+		// this one is about whether the claimed authorship is genuine,
+		// not whether these bytes match the requested hash — a
+		// dishonest pusher can craft arbitrary content and correctly
+		// self-hash it, but can't produce a valid signature for a
+		// fingerprint it doesn't hold the private key for. Checked
+		// before Put so a forged authorship claim is never persisted at
+		// all. An unsigned patch (no fingerprint claimed) always passes.
+		if !p.VerifyAuthorSignature() {
+			return fmt.Errorf("vcsfs: patch %s claims authorship by fingerprint %x but its signature doesn't verify — possible forgery", f.want, p.AuthorFingerprint)
+		}
 		got, err := f.fs.Store.Put(p)
 		if err != nil {
 			return fmt.Errorf("vcsfs: storing patch: %w", err)

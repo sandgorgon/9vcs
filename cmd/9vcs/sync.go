@@ -303,6 +303,16 @@ func fetchPatch(c *client.Client, store *patches.Store, hash patches.Hash) (*pat
 	if p.Hash() != hash {
 		return nil, fmt.Errorf("patch %s: received content hashes to %s instead — corrupted or untrustworthy transfer", hash, p.Hash())
 	}
+	// A different check from the hash comparison above: that one proves
+	// these bytes are what's stored under this hash (transit integrity),
+	// not that the claimed authorship is real — a dishonest peer can
+	// craft arbitrary content and correctly self-hash it, but can't
+	// produce a valid signature for a fingerprint it doesn't hold the
+	// private key for. An unsigned patch (no fingerprint claimed) always
+	// passes this; only a present-but-invalid signature is refused.
+	if !p.VerifyAuthorSignature() {
+		return nil, fmt.Errorf("patch %s: claims authorship by fingerprint %x but its signature doesn't verify — possible forgery", hash, p.AuthorFingerprint)
+	}
 	if _, err := store.Put(p); err != nil {
 		return nil, fmt.Errorf("storing patch %s: %w", hash, err)
 	}

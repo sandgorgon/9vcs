@@ -1,6 +1,8 @@
 package vcsfs
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"io"
 	"net"
 	"testing"
@@ -122,6 +124,78 @@ func TestPatchWriteWrongHashRejected(t *testing.T) {
 	}
 	if fs.Store.Has(claimedHash) {
 		t.Error("content should not be reachable under the wrong claimed hash")
+	}
+}
+
+// TestPatchWriteForgedAuthorshipRejected: a patch claiming a fingerprint
+// via a signature that doesn't actually verify against it (the "relay
+// crafts a fake patch and claims it's from someone else" scenario the
+// AuthorFingerprint/AuthorSignature design exists to catch — see
+// PLAN.md decision #1) must be refused, and never become reachable
+// under any hash — not stored under its self-consistent real hash the
+// way TestPatchWriteWrongHashRejected's honest-but-misnamed content is,
+// since this check runs before Store.Put at all.
+func TestPatchWriteForgedAuthorshipRejected(t *testing.T) {
+	fs, _ := newTestFS(t)
+	c := dialWith(t, fs, identity.PermWrite)
+
+	victimPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, attackerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := &patches.Patch{Message: "forged patch"}
+	copy(p.AuthorFingerprint[:], victimPub)                                     // claims the victim's identity
+	copy(p.AuthorSignature[:], ed25519.Sign(attackerPriv, p.SignablePayload())) // but signed with a different key
+	realHash := p.Hash()
+
+	f, err := c.Create("patches/"+realHash.String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write(p.Encode()); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := f.Close(); err == nil {
+		t.Fatal("expected Close to report the forged authorship claim, got nil")
+	}
+	if fs.Store.Has(realHash) {
+		t.Error("a forged authorship claim must not be stored at all, under any hash")
+	}
+}
+
+// TestPatchWriteSignedAuthorshipAccepted: the honest counterpart — a
+// patch genuinely signed by the fingerprint it claims must push through
+// exactly like an unsigned one.
+func TestPatchWriteSignedAuthorshipAccepted(t *testing.T) {
+	fs, _ := newTestFS(t)
+	c := dialWith(t, fs, identity.PermWrite)
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &patches.Patch{Message: "genuinely signed patch"}
+	copy(p.AuthorFingerprint[:], pub)
+	copy(p.AuthorSignature[:], ed25519.Sign(priv, p.SignablePayload()))
+	hash := p.Hash()
+
+	f, err := c.Create("patches/"+hash.String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write(p.Encode()); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !fs.Store.Has(hash) {
+		t.Error("a genuinely signed patch should be stored like any other")
 	}
 }
 

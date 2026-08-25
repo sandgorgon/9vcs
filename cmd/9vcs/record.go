@@ -145,6 +145,7 @@ func cmdRecord(args []string) error {
 	for _, fc := range changes {
 		patch.Changes = append(patch.Changes, fc)
 	}
+	signPatch(patch)
 
 	hash, err := r.store.Put(patch)
 	if err != nil {
