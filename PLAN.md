@@ -52,6 +52,274 @@ well-tested" is the realistic bar; "formally verified" would need actual
 proof work (e.g. a TLA+ spec of the commutation/reconcile protocol),
 called out as future work, not assumed.
 
+#### Author identity — concrete scope (2026-08-24, not yet built)
+
+Today `Patch.Author` is just `os/user.Current().Username` — whatever the
+local OS account happens to be called, no email, nothing configurable.
+Two improvements, deliberately scoped separately since they have very
+different blast radius:
+
+**Tier 1 — configurable name/email (git-style, no format change).**
+`Patch.Author` stays exactly what it is today: a single string. What
+changes is where it comes from:
+
+1. repo-local `.9vcs/config` (`name = ...` / `email = ...`, plain
+   `key = value` lines — same spirit as `authorized-peers`/`known-peers`'s
+   plain text formats, not real INI)
+2. global `~/.config/9vcs/config` (`os.UserConfigDir()/9vcs/config` —
+   same directory `identity` already owns, but this file is user
+   preference, not key material, so it lives alongside it rather than in
+   the `identity` package itself)
+3. OS username — unchanged fallback, so a fresh install behaves exactly
+   as it does today until configured
+
+`9vcs config user.name "..."` / `9vcs config user.email "..."` write to
+the repo-local file by default, `--global` writes to the user-wide one;
+called with no value, it prints the resolved value. `author()` in
+`cmd/9vcs/workingtree.go` becomes: resolve name/email through the
+precedence above, format as `"Name <email>"` (both set), `"Name"` (name
+only), or the OS-username fallback (neither set). Zero per-patch
+friction — configured once, read silently by every `record` after that,
+same as `git config user.name`/`user.email`.
+
+**Tier 2 — informational `AuthorFingerprint` (real format change).**
+`Patch` gains a new field: the recording install's existing Ed25519
+public key (`identity.Load().Key.Public()`), stored as a raw 32 bytes —
+same fixed-size-array treatment `Hash` already gets, not the hex string —
+so `log`/`bundle show` hex-encode it for display via `identity.Fingerprint`
+only at print time. Populated automatically at `record`, no user input.
+
+What this buys, and what it doesn't: it's self-reported and unsigned, so
+it's not proof of anything on its own — someone could hand-edit it before
+a patch is ever transmitted. Its real value shows up specifically on the
+`import`/`reconcile` path, where a patch already arrives over a
+TLS-authenticated connection (decision #7): the fetched patch's own
+`AuthorFingerprint` can be compared against the fingerprint the
+connection itself already verified, a free "did this peer actually
+author what they're sending, or relay someone else's patch" signal —
+informational only (relaying is normal, e.g. pulling through a shared
+hub), not a refusal. Exact UX for surfacing a mismatch (silent, a `log`
+annotation, an explicit flag) is still open — default to *not* warning,
+since relaying is the common case and a naive warning would just be
+noise.
+
+**Open question this tier forces, not resolved here**: `Patch.Encode()`/
+`Decode()` have no version discriminator today — adding a field changes
+the byte layout for every patch, and existing on-disk patches (already
+fixed to their old hash, immutable) won't parse against a `Decode` that
+expects a field they don't have. Since no repo outside this dev/test
+environment exists yet, the cheapest option is just accepting the
+breaking bump (`9vcs init` fresh). The other option — prefixing
+`Encode()`'s output with an explicit version byte now — costs little and
+means the *next* format change (e.g. full per-patch signing, deliberately
+not scoped here — see the "what do I gain" discussion: no per-patch
+non-repudiation without it, but real cost to the content-addressing
+format, not worth it while solo) doesn't hit the same wall twice. Leaning
+towards adding the version byte now, precisely because this is visibly
+the second time this question has come up.
+
+#### Config file format for user.name/email — concrete scope (2026-08-24, not yet built)
+
+**File format.** Plain text, one `key = value` per line, split on the
+*first* `=` only (a value may legitimately contain more of them) with
+both sides trimmed; blank lines and `#`-prefixed comments ignored — same
+missing-file-is-not-an-error convention `identity.LoadKnownPeers` already
+uses. Deliberately *not* git's sectioned INI (`[user]` / tab-indented
+keys): the two known keys are stored flat as `user.name` / `user.email`
+— the same dotted string the CLI takes — which needs no section-header
+parser at all and stays trivially extensible to more `9vcs config` keys
+later without a format change, consistent with the flat, minimal
+`key value`/`key = value` shape every other config-ish file in this
+codebase (`known-peers`, `authorized-peers`) already uses.
+
+```
+user.name = Ramon de Vera Jr.
+user.email = ramondevera@gmail.com
+```
+
+**Two files, resolved per-key like git, not per-file.** Repo-local
+`.9vcs/config` (`filepath.Join(r.dir, "config")`) is checked first for a
+given key; if that key specifically is absent, `~/.config/9vcs/config`
+(`os.UserConfigDir()/9vcs/config` — the directory `identity` already
+owns; reuse its existing `configDir()` logic via a small exported
+accessor rather than re-deriving the path in `cmd/9vcs`, since the file
+itself is a sibling of `identity.key`/`known-peers` in that same
+directory even though it isn't identity/crypto material) is checked next;
+absent from both means "unconfigured" for that key. Per-key, not
+per-file, matters concretely for the case that motivated this: run
+`9vcs config --global user.email ramondevera@gmail.com` once, machine-
+wide, and it applies everywhere — but a specific repo can still override
+just `user.email` locally (e.g. a work checkout wanting a different
+address) without needing to also repeat `user.name` there, exactly like
+`git config` cascades.
+
+**CLI.** `9vcs config [--global] <key> [<value>]`:
+- one arg → get: prints the *resolved* value (repo-local, else global,
+  else empty/"not configured"); `--global` restricts the lookup to only
+  the global file, skipping the repo-local override
+- two args → set: writes to the repo-local file by default, or the
+  global file with `--global`; `findRepo()` is only required for a
+  non-`--global` call (get or set) — a bare `--global` operation touches
+  only the user-wide file and works outside any repo, same as `9vcs
+  identity show` needs no repo today
+- `<key>` is validated against a fixed known-key list (`user.name`,
+  `user.email` only, for now) rather than accepting arbitrary keys — this
+  is deliberately not a general config system yet, just the two keys
+  `author()` actually needs; the flat file format doesn't need to change
+  when that list grows later, only the CLI's validation does
+
+**`author()` gets a new required parameter.** It's currently `func
+author() string` with no arguments; resolving repo-local config needs
+`r.dir`, so it becomes `func author(r *repo) string`, cascading
+`user.name`/`user.email` through the precedence above and formatting
+`"Name <email>"` / `"Name"` / the existing OS-username fallback exactly
+as already described. The one ripple: `record.go`'s call site changes
+from `Author: author()` to `Author: author(r)` — `r` is already in scope
+there.
+
+#### Patch encoding version byte — concrete scope (2026-08-24, not yet built)
+
+**The mechanism.** `Encode()` writes one new leading byte before anything
+else; `Decode()` reads it first and dispatches on it:
+
+```go
+const patchEncodingV1 byte = 1 // today's exact field set, just now version-tagged
+
+type Patch struct {
+    version byte // set by Decode to whatever it read; 0 means "freshly
+                 // constructed in this process, not yet round-tripped" —
+                 // Encode() then falls back to the newest version this
+                 // build knows, patchEncodingV1 today
+    Dependencies []Hash
+    Author       string
+    Time         time.Time
+    Message      string
+    Changes      []FileChange
+}
+
+func (p *Patch) Encode() []byte {
+    v := p.version
+    if v == 0 {
+        v = patchEncodingV1 // bump this constant when a new field lands
+    }
+    var buf bytes.Buffer
+    buf.WriteByte(v)
+    // ...unchanged today's field-by-field writes...
+}
+
+func Decode(data []byte) (*Patch, error) {
+    r := bytes.NewReader(data)
+    v, err := r.ReadByte()
+    ...
+    switch {
+    case v == patchEncodingV1:
+        return decodeV1(r, v) // today's exact Decode body, unchanged
+    case v > patchEncodingV1:
+        return nil, fmt.Errorf("patch: encoding version %d is newer than this build understands (max %d) — upgrade 9vcs", v, patchEncodingV1)
+    default: // v == 0, or any other value never issued
+        return nil, fmt.Errorf("patch: unrecognized encoding version %d", v)
+    }
+}
+```
+
+This is a **flag-day break, not a compatibility shim**: today's raw bytes
+have no leading byte, so the new `Decode` reads whatever byte actually
+comes first — near-certainly `0x00` in practice, since it's the
+big-endian high byte of `len(Dependencies)`, always a small number — and
+that falls straight into the `default` branch, a clear "unrecognized
+encoding version" error instead of a silent misparse. That's deliberate,
+not a gap: with no repo outside this dev/test environment, there's no
+real data to preserve, so failing loudly on old bytes is strictly better
+than either quietly corrupting them or spending effort auto-detecting
+the legacy shape. From this point forward, though, versioning is real:
+`patchEncodingV1` stays decodable forever, and a future `patchEncodingV2`
+(the `AuthorFingerprint` field from the subsection above) only needs its
+own `decodeV2` and a bump to the fallback constant — old patches never
+need touching again.
+
+**Why the `version` field has to be sticky per-instance, not just "always
+encode as the newest version"** — this is the one correctness-critical
+detail. `Hash()` is `sha256.Sum256(p.Encode())`, and both call sites that
+matter — `sync.go`'s `fetchPatch` (client pulling a patch from a peer)
+and `vcsfs.go`'s patch-write path (server receiving one) — do the same
+round-trip: `Decode` a peer's raw bytes into a `Patch`, then re-`Encode`
+it (directly via `p.Hash()`, and again inside `Store.Put`) and check the
+result still hashes to the hash it was fetched/pushed under. If `Encode`
+always emitted "whatever the newest version is" regardless of what a
+`Patch` was actually decoded from, re-encoding an old-version patch after
+a future version bump would silently produce different bytes than the
+original — a different hash than the one it's stored and requested
+under — and every historical patch would start failing `fetchPatch`'s
+own integrity check (misreported as "corrupted or untrustworthy
+transfer") the moment the encoding version next changes. Tagging each
+`Patch` with the version it was actually decoded from, and having
+`Encode` honor that tag, is what keeps `fetchPatch`/`vcsfs`'s round-trip
+hash check correct across a version bump — verified by inspection against
+both of those call sites, not yet by a running test.
+
+**Test to add**: a round-trip case that decodes a `patchEncodingV1`-tagged
+patch, re-`Encode`s it, and asserts byte-for-byte identity with the
+original — this is the regression that would otherwise only surface the
+next time the encoding version actually bumps, silently, in production
+use rather than in a test.
+
+#### AuthorFingerprint (`patchEncodingV2`) — concrete scope (2026-08-24, not yet built)
+
+Builds directly on both subsections above — this is `patchEncodingV2`,
+the first real user of the version-byte mechanism.
+
+**Field.** `AuthorFingerprint [32]byte` on `Patch` — the recording
+install's raw Ed25519 public key (`identity.Load().Key.Public()`), not
+its hex string, matching how `Hash`/`FileChange.Blob` are already stored.
+All-zero means "not set" (a v1 patch decoded before this field existed,
+or a v2 patch whose recorder's identity load failed — see below); a real
+Ed25519 public key is never all-zero, so the zero value is unambiguous.
+
+**Encode/Decode.** `decodeV2` is `decodeV1`'s field parsing (refactored
+into a shared helper both call) plus one trailing `io.ReadFull(r,
+p.AuthorFingerprint[:])`. `encodeV2` is `encodeV1`'s bytes plus
+`buf.Write(p.AuthorFingerprint[:])` appended at the end — appending
+rather than interleaving is what lets `decodeV1` stay untouched as a
+subroutine `decodeV2` builds on, instead of the two versions diverging
+mid-format. `Encode()`'s version dispatch (from the subsection above)
+gains one arm: `patchEncodingV2` once this field exists as the new
+fallback-to-latest constant.
+
+**Population — must not make `record` fragile.** `cmd/9vcs/record.go`'s
+patch construction gains `AuthorFingerprint: authorFingerprint()`, a new
+helper in `workingtree.go` alongside the existing `author()`, which calls
+`identity.Load()` and copies the returned `ed25519.PublicKey` into a
+`[32]byte`. Critically, `identity.Load()`'s failure must **not** fail
+`record` — `record` is the single most-invoked command, and blocking it
+on an unrelated identity/config-directory problem (permissions, disk
+full, whatever) would be a real regression for a field that's purely
+informational. `authorFingerprint()` swallows a load error, prints a
+one-line warning to stderr, and returns the zero value — same "degrade,
+don't block" posture `record` doesn't currently need anywhere else,
+because nothing it does today can fail this way.
+
+**Display.** `cmd/9vcs/log.go`'s per-entry loop prints a `Fingerprint:`
+line under `Author:` when `p.AuthorFingerprint` is non-zero, hex-encoded
+via the exact same `identity.Fingerprint` call peer auth already uses —
+one fingerprint computation, reused everywhere, so a patch's printed
+fingerprint is directly copy-pasteable against `9vcs identity show` or an
+`authorized-peers`/`known-peers` entry, not a parallel notion of
+"fingerprint" that happens to look similar.
+
+**Deliberately deferred, not built alongside this field**: the
+import/reconcile cross-check floated in the Author identity subsection
+above (comparing a fetched patch's `AuthorFingerprint` against the
+already-TLS-verified peer fingerprint at `sync.go`'s `fetchPatch`) needs
+threading the verified peer fingerprint down into `fetchPatch`, which
+today only takes `(c *client.Client, store *patches.Store, hash
+patches.Hash)` — a real but small plumbing change. Leaving it out of this
+pass on purpose: it's a UX decision (silent / logged / flagged) more than
+an encoding one, and doesn't need to land in the same change as the field
+itself. Same goes for the `bundle show`/`import` cross-reference noted
+earlier (does a patch's own `AuthorFingerprint` match the bundle's
+signer, i.e. did the sender author what they're sending, or relay it) —
+natural once both features exist, not before.
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:
@@ -232,6 +500,77 @@ long before hosting platforms existed — cryptographically verifiable,
 dependency-aware patches instead of plain-text diffs mailed around is
 the actual upgrade, not a review UI.
 
+#### Bundle export/import — concrete scope (2026-08-24, not yet built)
+
+New top-level package `bundle/` (sibling to `identity/`, `vcsfs/`,
+`synth/`), plus `cmd/9vcs/bundle.go` for the `bundle export|import|show`
+subcommands. Needs no changes to `objstore/patches` or `identity` — it
+only consumes their existing exported surface: `patches.Closure` (already
+variadic, so an arbitrary multi-root selection unions for free),
+`Store.Get`/`Put`, and `identity.Load().Key` used directly as a plain
+`ed25519.PrivateKey` (signing is a transport-provenance concern, separate
+from `identity`'s TLS/peer-auth one, so `bundle` calls `crypto/ed25519`
+itself rather than adding a signing method to `Identity`).
+
+**Wire format** (`.9vp` file), self-delimiting length-prefixed fields in
+the same style as `patch.go`'s `Encode`/`Decode`:
+
+```
+magic "9VCB" + version byte
+signerPub   (32 bytes, raw Ed25519 public key)
+signature   (64 bytes, ed25519.Sign over the payload bytes below, as-read)
+payload:
+  message      (length-prefixed string, from -m)
+  patch count  + each patch's raw Patch.Encode() output, length-prefixed
+  blob count   + each blob's hash (32 bytes) + content, length-prefixed
+```
+
+The signature covers the exact payload bytes as read off the wire — no
+re-encode round-trip needed to verify. Same content-addressing
+philosophy as everywhere else in this design: a patch is trusted because
+it hashes right; a bundle is trusted because it verifies right. No
+separate hash-pinning is needed for the patches/blobs inside a verified
+bundle either — `Store.Put`/`BlobStore.Put` re-derive their hash from
+content on the way in regardless, same as every other write path.
+
+**`9vcs bundle export <ref-or-hash>... -o file.9vp`**: resolves each arg
+the way `repo.resolveRef` already does (branch name, then full/abbreviated
+patch hash), unions their closures via `patches.Closure`, fetches the
+actual `Patch` objects via `store.Get`, collects any `KindBlob` content
+those patches reference, signs the payload with this install's identity
+key, writes the file. `-o` is required — no accidental binary-to-terminal
+default.
+
+**`9vcs bundle import <file>`**: decodes, verifies the Ed25519 signature,
+`store.Put`s every patch and blob, prints the signer's fingerprint +
+message + a `log`-style summary of what was added. Touches no ref, per
+the mechanism above — nothing is integrated until a human reviews
+(`bundle show` / `diff`) and runs `apply`.
+
+**`9vcs bundle show <file>`**: same decode+verify+print as import, minus
+the `store.Put` — pure inspection, doesn't touch local storage at all.
+
+**Deliberately no persistent trusted-signers store**, unlike the
+live-peer TOFU model (`identity.KnownPeers`): a bundle arrives over
+email/chat/USB with no repeated connection to protect, so the signature's
+whole job is making the printed fingerprint trustworthy for *this one*
+review — the human decides whether to trust it at `apply` time, the same
+way code review already requires judgment. Note the bundle signature
+(who assembled and sent this file) is a different question from each
+patch's existing `Author` field (who wrote the change) — a bundle can
+carry patches authored by people other than its signer.
+
+**`apply` is out of this scope, flagged as a dependency, not solved
+here**: `merge.go`'s `resolveRef` already accepts a bare patch hash as
+its merge target, so applying one selected patch may mostly fall out of
+the existing two-way merge machinery (`mergeutil.go`) as-is. What's
+genuinely open: chaining multiple selected patches in one `apply` call —
+`cmdMerge` currently refuses a second `merge` while one is already
+in-progress (`MERGE_HEAD` set), so applying N patches back-to-back needs
+either an auto-record between each clean (non-conflicting) merge, or a
+true N-way merge patch (`Dependencies = [ours, p1, ..., pN]`) computed in
+one call — undecided, revisit when `apply` itself is scoped.
+
 ## Vocabulary (deliberately not GitHub-shaped)
 
 | Instead of | Use |
@@ -398,11 +737,40 @@ used to say:
   materialize identical bytes) or a linear-history-only fast path that
   falls back to a full replay for any merge patch, which is a real
   future option if the per-invocation cache turns out not to be enough.
+- Author identity, Tier 1 (decision #1's "Author identity — concrete
+  scope," the config-file half only): built and verified live.
+  `cmd/9vcs/config.go` implements the flat `key = value` file format and
+  the repo-local-then-global cascade exactly as scoped, `9vcs config
+  [-global] <key> [<value>]` gets/sets `user.name`/`user.email`, and
+  `author()` (now `author(r *repo) (string, error)`, its one call site in
+  `record.go` updated) formats `"Name <email>"` / `"Name"` / the
+  unchanged OS-username fallback through a separately-tested pure
+  `formatAuthor` step. Verified end to end: an unconfigured repo still
+  records under the OS username exactly as before; configuring
+  repo-local `user.name`/`user.email` changes only patches recorded
+  *after* that point (already-recorded patches stay exactly as they
+  were, immutable); an unknown key is rejected with a clear error; and
+  the per-key cascade actually cascades per key, not per file — setting
+  global `user.name`/`user.email` while a repo overrides only
+  `user.email` locally correctly resolves `user.name` from global and
+  `user.email` from the repo-local file. `AuthorFingerprint`
+  (`patchEncodingV2`) and the version-byte mechanism it needs remain
+  unbuilt — see Open items.
 
 ## Open items to revisit
 
 - Bundle export/import (decision #8: signed, offline patch exchange)
-  isn't built.
+  isn't built. Concrete scope (wire format, package layout, CLI surface)
+  is now written up under decision #8's "Bundle export/import — concrete
+  scope" subsection, as of 2026-08-24 — implementation not started.
+- `Patch.Author` Tier 1 (configurable `user.name`/`user.email`, no wire
+  format change) is built — see Status. Still open: the patch-encoding
+  version byte and the `AuthorFingerprint` field it unblocks
+  (`patchEncodingV2`), both concretely scoped under decision #1 as of
+  2026-08-24 but not yet implemented. Full per-patch signing was
+  considered and deliberately left out of scope entirely (see that
+  subsection) — not worth the content-addressing format cost for a solo
+  install with no second identity to correlate against yet.
 - iOS build: checked from this Linux dev environment, and it cannot be
   done here — not a gap in this codebase (neither it nor
   `sandgorgon/9p` uses cgo, confirmed by grepping both for `import

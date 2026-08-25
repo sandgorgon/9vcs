@@ -22,7 +22,7 @@ type KnownPeers map[string]string // addr -> fingerprint
 // KnownPeersPath returns this install's known-peers file path, creating
 // its config directory if needed — the file itself need not exist yet.
 func KnownPeersPath() (string, error) {
-	dir, err := configDir()
+	dir, err := ConfigDir()
 	if err != nil {
 		return "", err
 	}

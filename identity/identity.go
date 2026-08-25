@@ -56,10 +56,12 @@ func FingerprintOf(cert *x509.Certificate) (string, error) {
 	return Fingerprint(pub), nil
 }
 
-// configDir is where this install's identity lives — machine-wide, not
+// ConfigDir is where this install's identity lives — machine-wide, not
 // per-repo: every 9vcs repo on this machine shares one identity, matching
 // PLAN.md ("each 9vcs install generates a long-lived Ed25519 keypair").
-func configDir() (string, error) {
+// Exported so other 9vcs-owned files that belong in this same directory
+// (e.g. cmd/9vcs's user config) don't need to re-derive the path.
+func ConfigDir() (string, error) {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
@@ -74,7 +76,7 @@ func configDir() (string, error) {
 // Load loads this install's identity, generating and persisting a new one
 // on first use.
 func Load() (*Identity, error) {
-	dir, err := configDir()
+	dir, err := ConfigDir()
 	if err != nil {
 		return nil, err
 	}

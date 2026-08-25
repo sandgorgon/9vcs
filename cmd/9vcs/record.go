@@ -137,7 +137,11 @@ func cmdRecord(args []string) error {
 		deps = append(deps, mergeHead)
 	}
 
-	patch := &patches.Patch{Dependencies: deps, Author: author(), Time: time.Now(), Message: *message}
+	authorStr, err := author(r)
+	if err != nil {
+		return fmt.Errorf("record: %w", err)
+	}
+	patch := &patches.Patch{Dependencies: deps, Author: authorStr, Time: time.Now(), Message: *message}
 	for _, fc := range changes {
 		patch.Changes = append(patch.Changes, fc)
 	}

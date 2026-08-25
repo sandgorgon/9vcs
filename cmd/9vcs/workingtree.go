@@ -12,7 +12,37 @@ import (
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
-func author() string {
+// author resolves this record's Author string: "Name <email>" if both
+// user.name and user.email are configured (see resolvedAuthorField for
+// the repo-local-then-global precedence), "Name" alone if only
+// user.name is, or the OS username if neither is configured — unchanged
+// fallback, so a fresh, unconfigured install behaves exactly as before.
+// A malformed config file (hand-edited, since `9vcs config` itself never
+// writes one) is a real error here rather than a silent fallback — it's
+// a user mistake worth surfacing, not an incidental environment failure.
+func author(r *repo) (string, error) {
+	name, err := resolvedAuthorField(r, "user.name")
+	if err != nil {
+		return "", fmt.Errorf("resolving user.name: %w", err)
+	}
+	email, err := resolvedAuthorField(r, "user.email")
+	if err != nil {
+		return "", fmt.Errorf("resolving user.email: %w", err)
+	}
+	return formatAuthor(name, email), nil
+}
+
+// formatAuthor is author's pure formatting step, split out so it's
+// testable without touching any config file or the real OS/global
+// config directory: "Name <email>" if both are set, "Name" alone if
+// only name is, otherwise the OS username fallback.
+func formatAuthor(name, email string) string {
+	switch {
+	case name != "" && email != "":
+		return fmt.Sprintf("%s <%s>", name, email)
+	case name != "":
+		return name
+	}
 	if u, err := user.Current(); err == nil && u.Username != "" {
 		return u.Username
 	}

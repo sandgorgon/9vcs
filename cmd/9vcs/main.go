@@ -31,6 +31,8 @@ func main() {
 		err = cmdMerge(os.Args[2:])
 	case "identity":
 		err = cmdIdentity(os.Args[2:])
+	case "config":
+		err = cmdConfig(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
 	case "import":
@@ -63,6 +65,9 @@ commands:
   diff [<ref>] [<ref>]        show uncommitted changes, or the difference between two points
   merge <name-or-hash>        merge a branch or patch into the current branch
   identity show               print this install's fingerprint, for out-of-band exchange
+  config [-global] <key> [<value>]
+                               get or set user.name / user.email, used as the patch Author;
+                               writes to this repo by default, or -global for every repo here
   serve <addr>                serve this repo over 9P+TLS to peers in .9vcs/authorized-peers
   import [-peer-fingerprint <hex>] <addr> <ref-name> [<local-name>]
                                pull a ref and its missing patches/blobs from a peer (fast-forward only)
