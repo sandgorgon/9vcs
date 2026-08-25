@@ -99,7 +99,7 @@ func cmdMerge(args []string) error {
 		if err := writeWorkingTree(r, oursIdx, theirsIdx); err != nil {
 			return fmt.Errorf("writing working tree: %w", err)
 		}
-		if err := r.setRefHash(branch, theirs); err != nil {
+		if err := r.setLocalRefCAS(branch, ours, theirs); err != nil {
 			return err
 		}
 		fmt.Printf("fast-forwarded %s to %s\n", branch, theirs.String()[:12])

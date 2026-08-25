@@ -108,7 +108,7 @@ func cmdApply(args []string) error {
 			if err := writeWorkingTree(r, oursIdx, targetIdx); err != nil {
 				return fmt.Errorf("writing working tree: %w", err)
 			}
-			if err := r.setRefHash(branch, targets[0]); err != nil {
+			if err := r.setLocalRefCAS(branch, ours, targets[0]); err != nil {
 				return err
 			}
 			fmt.Printf("fast-forwarded %s to %s\n", branch, targets[0].String()[:12])

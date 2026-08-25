@@ -42,7 +42,7 @@ func recordForTest(t *testing.T, r *repo, msg string) patches.Hash {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setRefHash(branch, hash); err != nil {
+	if err := r.setLocalRefCAS(branch, head, hash); err != nil {
 		t.Fatal(err)
 	}
 	return hash

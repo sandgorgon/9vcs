@@ -42,7 +42,7 @@ func cmdBranch(args []string) error {
 		}
 	}
 
-	if err := r.setRefHash(name, start); err != nil {
+	if err := r.setLocalRefCAS(name, patches.Hash{}, start); err != nil {
 		return err
 	}
 	fmt.Printf("created branch %s at %s\n", name, start.String()[:12])

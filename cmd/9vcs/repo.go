@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
+	"time"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
 	"github.com/sandgorgon/9vcs/synth"
@@ -27,15 +27,6 @@ type repo struct {
 	blobs  *patches.BlobStore
 	offers *patches.BlobStore // pending offer bundles received via `9vcs serve`'s /offers — see PLAN.md decision #8
 	cache  *synth.Cache       // memoizes materialize within this one invocation
-
-	// refMu guards setRefHashCAS's check-then-write against concurrent
-	// peer connections within one `9vcs serve` process — the only case
-	// where ref writes are actually concurrent (every local command is
-	// its own process invocation, not a goroutine racing others in the
-	// same one). Cross-process races on the plain ref files remain
-	// unguarded, same as every other local write in this repo; not
-	// something reconcile introduces or is trying to solve.
-	refMu sync.Mutex
 }
 
 var errNotARepo = errors.New("not a 9vcs repository (or any parent directory)")
@@ -88,6 +79,76 @@ func (r *repo) materialize(roots ...patches.Hash) (patches.Index, error) {
 	return r.cache.Materialize(roots...)
 }
 
+// refLockPath is the cross-process advisory lock every ref/HEAD mutation
+// takes for its critical section — see withRefLock.
+func (r *repo) refLockPath() string { return filepath.Join(r.dir, "lock") }
+
+const (
+	// refLockAcquireTimeout bounds how long withRefLock waits for a
+	// contended lock before giving up — generous relative to the
+	// critical section it protects (a single small file read + write,
+	// milliseconds in practice), so a real timeout here means something
+	// is actually stuck, not just briefly busy.
+	refLockAcquireTimeout = 5 * time.Second
+	refLockRetryInterval  = 20 * time.Millisecond
+	// refLockStaleAge is how old an existing lock file has to be before
+	// withRefLock assumes it was abandoned by a crashed process and
+	// steals it, rather than deadlocking forever. Generous relative to
+	// how long the critical section this guards ever legitimately runs
+	// for, for the same reason as refLockAcquireTimeout.
+	refLockStaleAge = 10 * time.Second
+)
+
+// withRefLock runs fn while holding this repo's cross-process file lock
+// — the actual mutual exclusion setRefHashCAS/setLocalRefCAS/
+// setHeadBranch/setHeadDetached need. An in-memory mutex (what this
+// repo used before) only ever guards goroutines within one process; two
+// separate local CLI invocations, or a local command racing a live
+// `serve`'s incoming push, are different OS processes with no shared
+// memory to synchronize through at all. Go's stdlib has no flock
+// primitive, and this project stays stdlib-only (see PLAN.md), so this
+// uses os.O_EXCL as the actual mutex primitive instead: atomically
+// creating the lock file is the acquire, removing it is the release —
+// same shape as many tools' simple lockfile convention.
+func (r *repo) withRefLock(fn func() error) error {
+	path := r.refLockPath()
+	deadline := time.Now().Add(refLockAcquireTimeout)
+	for {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			f.Close()
+			break
+		}
+		if !os.IsExist(err) {
+			return fmt.Errorf("acquiring ref lock: %w", err)
+		}
+		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > refLockStaleAge {
+			os.Remove(path) // best-effort: if another stealer wins this race, the next loop iteration's OpenFile sorts it out
+			continue
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("ref lock %s is held by another 9vcs process; if you're sure nothing else is running against this repo, remove it manually", path)
+		}
+		time.Sleep(refLockRetryInterval)
+	}
+	defer os.Remove(path)
+	return fn()
+}
+
+// atomicWriteFile writes data to path via a temp file in the same
+// directory, then renames it into place — matching
+// objstore/patches/rawstore.go's rawStore.put: a reader (or a crash
+// mid-write) never observes a partially-written file, only the old
+// content or the new content, in full, never a mix. Plain os.WriteFile
+// (what every ref/HEAD write used before) offers no such guarantee.
+func atomicWriteFile(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func (r *repo) headFile() string { return filepath.Join(r.dir, "HEAD") }
 
 func (r *repo) refPath(name string) string { return filepath.Join(r.dir, "refs", name) }
@@ -107,11 +168,15 @@ func (r *repo) currentBranch() (string, error) {
 }
 
 func (r *repo) setHeadBranch(name string) error {
-	return os.WriteFile(r.headFile(), []byte("ref: "+name+"\n"), 0o644)
+	return r.withRefLock(func() error {
+		return atomicWriteFile(r.headFile(), []byte("ref: "+name+"\n"))
+	})
 }
 
 func (r *repo) setHeadDetached(h patches.Hash) error {
-	return os.WriteFile(r.headFile(), []byte(h.String()+"\n"), 0o644)
+	return r.withRefLock(func() error {
+		return atomicWriteFile(r.headFile(), []byte(h.String()+"\n"))
+	})
 }
 
 // headHash resolves HEAD (symbolic or detached) to a concrete patch hash.
@@ -148,11 +213,16 @@ func (r *repo) refHash(name string) (patches.Hash, bool, error) {
 	return h, true, nil
 }
 
-func (r *repo) setRefHash(name string, h patches.Hash) error {
+// writeRefFileLocked atomically writes h as name's ref content. Callers
+// must already hold this repo's ref lock (withRefLock) — this has no
+// locking of its own, deliberately, so casWriteRef's whole
+// compare-then-write sequence runs under a single lock acquisition, not
+// two nested ones.
+func (r *repo) writeRefFileLocked(name string, h patches.Hash) error {
 	if err := os.MkdirAll(filepath.Dir(r.refPath(name)), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(r.refPath(name), []byte(h.String()+"\n"), 0o644)
+	return atomicWriteFile(r.refPath(name), []byte(h.String()+"\n"))
 }
 
 // errRefConflict marks a CAS ref-write failure: the caller's view of the
@@ -166,43 +236,67 @@ var errRefConflict = errors.New("ref changed since last observed")
 
 // setRefHashCAS updates name's ref to new, but only if its current value
 // is exactly old (the zero hash meaning "must not exist yet") — the
-// write side of vcsfs's /refs contract (see vcsfs.RefWriter), and the
-// only ref-write path that needs to guard against a concurrent write
-// from another peer connection; see refMu.
+// write side of vcsfs's /refs contract (see vcsfs.RefWriter): a served
+// peer connection pushing to this repo. Refuses to move the branch
+// currently checked out here (see casWriteRef) — a rule specific to a
+// network push, not to setLocalRefCAS's local callers.
 func (r *repo) setRefHashCAS(name string, old, new patches.Hash) error {
+	return r.casWriteRef(name, old, new, true)
+}
+
+// setLocalRefCAS is setRefHashCAS without the checked-out-branch
+// refusal: every local mutating command (record, merge, checkout -b,
+// branch, apply, reconcile/import's local pull) uses this in place of a
+// blind, unconditional write, so a concurrent writer — another local
+// command in a different terminal, or a live `serve`'s incoming push —
+// produces a clean, reported conflict instead of silently discarding
+// whichever write lost the race. Every call site already has the "old"
+// hash it read earlier in scope (head, the branch's current tip, the
+// caller's last-observed remote hash), so this is routing through the
+// same compare-and-swap the network path always had, not new
+// bookkeeping for callers.
+func (r *repo) setLocalRefCAS(name string, old, new patches.Hash) error {
+	return r.casWriteRef(name, old, new, false)
+}
+
+// casWriteRef is setRefHashCAS/setLocalRefCAS's shared implementation.
+// refuseCheckedOutBranch is true only for the network-facing case — see
+// its doc comment on setRefHashCAS's original version for the full
+// rationale (a push moving the checked-out branch out from under the
+// working tree without also updating it, which a local command never
+// does, since it always updates both together in the same call).
+//
+// The whole compare-then-write sequence runs inside withRefLock — not
+// just the final write — because that's what actually closes the race
+// this exists for: checking "is old still current" and writing the new
+// value have to be atomic together, or two callers can both pass the
+// check before either writes.
+func (r *repo) casWriteRef(name string, old, new patches.Hash, refuseCheckedOutBranch bool) error {
 	if !new.IsZero() && !r.store.Has(new) {
 		return fmt.Errorf("cannot point %q at unknown patch %s", name, new)
 	}
-	r.refMu.Lock()
-	defer r.refMu.Unlock()
-
-	// Refuse to move the branch currently checked out here — same
-	// default git ships (receive.denyCurrentBranch=refuse). Updating it
-	// out from under the working tree wouldn't corrupt anything (the
-	// object store stays correct either way), but the working tree would
-	// silently stop matching HEAD's ref until someone happens to
-	// checkout/diff and gets a confusing wall of "uncommitted changes"
-	// that were never actually made locally. A local `record` or `merge`
-	// never hits this: they always update the working tree and the ref
-	// together, in the same command.
-	if branch, err := r.currentBranch(); err != nil {
-		return err
-	} else if branch == name {
-		return fmt.Errorf("refusing to update %q: it is the branch currently checked out here — the working tree would desync from it; check out a different branch here first, or push under a different name", name)
-	}
-
-	current, exists, err := r.refHash(name)
-	if err != nil {
-		return err
-	}
-	if exists {
-		if current != old {
-			return fmt.Errorf("%w: %q is at %s, not %s", errRefConflict, name, current, old)
+	return r.withRefLock(func() error {
+		if refuseCheckedOutBranch {
+			if branch, err := r.currentBranch(); err != nil {
+				return err
+			} else if branch == name {
+				return fmt.Errorf("refusing to update %q: it is the branch currently checked out here — the working tree would desync from it; check out a different branch here first, or push under a different name", name)
+			}
 		}
-	} else if !old.IsZero() {
-		return fmt.Errorf("%w: %q does not exist, expected %s", errRefConflict, name, old)
-	}
-	return r.setRefHash(name, new)
+
+		current, exists, err := r.refHash(name)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if current != old {
+				return fmt.Errorf("%w: %q is at %s, not %s (another 9vcs command updated it concurrently — re-run)", errRefConflict, name, current, old)
+			}
+		} else if !old.IsZero() {
+			return fmt.Errorf("%w: %q does not exist, expected %s", errRefConflict, name, old)
+		}
+		return r.writeRefFileLocked(name, new)
+	})
 }
 
 func (r *repo) mergeHeadFile() string { return filepath.Join(r.dir, "MERGE_HEAD") }
