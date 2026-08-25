@@ -222,12 +222,13 @@ type FileChange struct {
 // therefore real data whose compatibility actually matters — see
 // PLAN.md decision #1.
 //
-// Bumped 1 -> 2 to add FileChange.Executable and KindSymlink/
-// SymlinkTarget (see PLAN.md's "File mode and symlinks — concrete
-// scope"): still pre-release at the time of the bump, so this is an
-// in-place change, not a new dispatched version — the old value 1 is
-// simply no longer recognized.
-const patchFormatVersion byte = 2
+// Renumbered back to 1 just ahead of the first tagged release (was
+// briefly 2, an in-place pre-release bump to add FileChange.Executable
+// and KindSymlink/SymlinkTarget — see PLAN.md's "File mode and symlinks
+// — concrete scope"): neither value was ever externally depended on, so
+// there was no reason to ship a first release with "2" as the very
+// first number anyone outside this repo ever sees.
+const patchFormatVersion byte = 1
 
 // Patch is one immutable, content-addressed unit of history: a set of
 // per-file graph operations, plus the patches whose effects those ops

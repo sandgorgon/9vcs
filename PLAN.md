@@ -310,10 +310,11 @@ format change rather than triggering real version-dispatch machinery
 formal release *and* a subsequent change after it — only the second half
 was true here).
 
-**Format change: `patchFormatVersion` 1 → 2.** `FileChange`/`PathState`
-both gained `Executable bool` (meaningful for `KindText`/`KindBlob`
-only — a symlink's own mode bits are POSIX-meaningless) and a new
-`KindSymlink` with `SymlinkTarget string` (stored as a plain string, not
+**Format change: `patchFormatVersion` 1 → 2 (later renumbered back to 1,
+see "Release versioning" below).** `FileChange`/`PathState` both gained
+`Executable bool` (meaningful for `KindText`/`KindBlob` only — a
+symlink's own mode bits are POSIX-meaningless) and a new `KindSymlink`
+with `SymlinkTarget string` (stored as a plain string, not
 blob-addressed — a target is a handful of bytes, not file content worth
 a separate content-addressed entry). `Encode`/`Decode` updated in
 lockstep, pinned by `TestEncodeDecodeRoundTripExecutableAndSymlink`.
@@ -372,6 +373,83 @@ pre-conflict target. Switching back and forth between two real branches
 that differ only in one file's executable bit correctly flipped the bit
 each direction, on the same already-existing path — the exact scenario
 bug 2 above would have silently gotten wrong.
+
+#### Release versioning — decided (2026-08-25)
+
+Resolves the "No release/versioning process yet" open item that used to
+sit at the end of this document. Two separate things needed a scheme:
+
+**The project's own release version:** standard semver, starting at
+`v0.x.y`. Nothing 9vcs-specific here — Go modules treat `v0`/`v1`
+identically import-path-wise, so no extra decision is needed until a
+hypothetical `v2` (which would need the `/v2` import-path suffix Go
+modules require for major versions ≥ 2).
+
+**The patch/bundle encoding format version** (`patchFormatVersion`,
+bundle's `formatVersion`) is the one with real teeth: `Patch.Hash()` is
+`sha256(p.Encode())`, so the hash covers the *encoded bytes, including
+the version byte* — every patch's identity, and every other patch's
+`Dependencies` reference to it, is pinned to its exact original
+encoding forever. A future format change can't just swap old decoding
+for new without real multi-version dispatch (or a full history rewrite
+that mints new hashes for everything). `SignablePayload()` also embeds
+`patchFormatVersion` as its first byte, so re-encoding a patch under a
+different format version changes what its `AuthorSignature` was
+computed over — a naive re-encode would silently invalidate every
+historical signature, and the original author usually isn't available
+to re-sign old history years later.
+
+Decided: defer the *mechanism* (real dispatch), commit to a *policy*
+instead — the "single format until both a formal release and a real
+need to change it again" default already in place stays exactly as-is.
+`v0.x` releases make no format-compatibility promise between
+themselves (documented in the README/CHANGELOG when the first tag
+ships); the actual permanent promise — "format version N will always be
+decodable" — is a `v1.0.0` decision, not this one. When a real reason to
+change the format eventually shows up, the current self-describing,
+leading-version-byte encoding makes adding a new dispatched `case`
+cheap to do *then*, against a concrete, known change — not speculatively
+now against an unknown one.
+
+Ahead of committing to that promise, `patchFormatVersion` was
+renumbered from 2 back to **1** (see `patchFormatVersion`'s doc comment
+and the "File mode and symlinks" write-up above): the in-place 1→2 bump
+happened entirely pre-release, so neither value was ever externally
+depended on, and shipping a first release with "2" as the first number
+anyone outside this repo ever sees would have been a pointless artifact
+of pre-release iteration. (Caveat for anyone who already has a real
+`.9vcs` repo — even a personal dogfooding one — with patches recorded
+under the old value 2: this renumbering makes that repo's stored
+patches undecodable; it needs reinitializing, or bundle-exporting its
+current content before the renumbering and importing after.)
+
+**Migration tooling, for when a format change eventually happens:** a
+generic "convert any old format to the current one" utility isn't
+really a buildable thing today — the actual field-by-field mapping
+depends entirely on what a *future* change actually does, which isn't
+known yet, and (per the signature point above) any such conversion
+would need to either invalidate old signatures or find some way to
+preserve them, which also depends on the specifics of what changed. So
+rather than build speculative converter machinery now, the commitment
+is a **principle**: any future format-breaking change ships together
+with its own purpose-built migration path (e.g. a `9vcs migrate`
+subcommand, or a documented procedure), written by whoever makes that
+specific change, since only they know the exact old-to-new mapping —
+the same "spec it when there's a concrete need, not before" approach
+this project already uses for `github.com/sandgorgon/9p` library
+changes.
+
+This doesn't leave existing users with nothing today, though: `9vcs
+bundle export`/`import` already transports patches by their existing
+hash, unchanged — no re-encoding involved, so it's unaffected by any
+future format bump on either side as long as both installs still
+recognize whatever formats are actually present in the bundle. And
+worst case, even without any dedicated migration tooling at all, a
+user's *current* working-tree content is never at risk — `9vcs init` a
+fresh repo and record the current snapshot as a new root is always
+available as a last resort. What a future incompatible format bump
+could cost, absent a purpose-built migration path, is the fine-grained
+patch *history* (the graph itself), never the actual file content.
 
 #### Path traversal via `FileChange.Path` — real vulnerability, found and fixed (2026-08-25)
 
@@ -2161,9 +2239,11 @@ used to say:
 ## Open items to revisit
 
 Every decision-#1–#8 design item this section used to track (bundle
-export/import, `apply`, `/offers`, both tiers of `Patch.Author`, real
-multi-version encoding dispatch) is built — see Status for each. What's
-actually left:
+export/import, `apply`, `/offers`, both tiers of `Patch.Author`) is
+built — see Status for each. Real multi-version encoding dispatch was
+deliberately *not* built — see "Release versioning — decided" above for
+why (a policy commitment now, real dispatch machinery only once there's
+a concrete format change to dispatch on). What's actually left:
 
 - **iOS build: still genuinely unverified.** Checked from this Linux dev
   environment and it cannot be attempted here — not a gap in this
@@ -2179,15 +2259,6 @@ actually left:
   with careful `filepath.FromSlash`/`ToSlash` use throughout, so it
   should build and run unmodified, but "should" isn't "verified." Needs
   an actual Windows host to confirm.
-- **No release/versioning process yet.** Every "pre-release, one user,
-  no format-compatibility concerns" argument used throughout this
-  document (decision #1's format-version tripwire byte being kept
-  minimal instead of building real dispatch, most notably) stops holding
-  once a first tagged release exists and other installs have real,
-  depended-upon data. Not urgent while it's still just this repo's own
-  history, but worth deciding deliberately (a version scheme, a
-  CHANGELOG, what "1.0" would even mean for a patch-theory VCS) before
-  it happens by accident.
 - **Required PR reviewer count is 0.** Branch protection requires a PR
   and a passing CI check, but not a second approval — reasonable while
   it's mostly one person, worth raising once there's more than one
