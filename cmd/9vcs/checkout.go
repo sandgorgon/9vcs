@@ -67,7 +67,7 @@ func cmdCheckout(args []string) error {
 				return fmt.Errorf("checkout -b: %w", err)
 			}
 		}
-		if err := r.setRefHash(name, start); err != nil {
+		if err := r.setLocalRefCAS(name, patches.Hash{}, start); err != nil {
 			return err
 		}
 		targetHash, branch = start, name

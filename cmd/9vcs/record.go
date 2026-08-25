@@ -165,7 +165,7 @@ func cmdRecord(args []string) error {
 	if err != nil {
 		return fmt.Errorf("writing patch: %w", err)
 	}
-	if err := r.setRefHash(branch, hash); err != nil {
+	if err := r.setLocalRefCAS(branch, head, hash); err != nil {
 		return fmt.Errorf("updating ref: %w", err)
 	}
 	if midMerge {

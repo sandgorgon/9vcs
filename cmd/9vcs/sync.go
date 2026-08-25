@@ -211,7 +211,7 @@ func pullRef(r *repo, localName string, localHash, remoteHash patches.Hash) erro
 			return fmt.Errorf("writing working tree: %w", err)
 		}
 	}
-	return r.setRefHash(localName, remoteHash)
+	return r.setLocalRefCAS(localName, localHash, remoteHash)
 }
 
 // fetchRefHash fetches a peer's ref, treating its absence as an error —

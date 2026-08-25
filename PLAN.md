@@ -439,6 +439,71 @@ any hash — mirroring how `TestPatchWriteForgedAuthorshipRejected`
 already proved the *authorship* side of "don't trust bytes just because
 they parse."
 
+#### Ref/HEAD write atomicity and local concurrency — found and fixed (2026-08-25)
+
+**The gap, found by auditing rather than reported**: every local ref/HEAD
+write (`setRefHash`, `setHeadBranch`, `setHeadDetached`) was a plain
+`os.WriteFile` straight to the final path — not the temp-file-then-rename
+pattern `rawStore.put` already used for the content-addressed store — so
+a crash mid-write could leave a torn ref. Worse, none of it was
+compare-and-swap: `record`/`merge`/`apply`/`reconcile`'s local pull all
+read a branch's current hash, decided a new one, and wrote it
+unconditionally, with `refMu` — an in-memory `sync.Mutex` — as the only
+guard, and that only ever protects goroutines *within one process*. Two
+separate local CLI invocations (two terminals, or a script and a
+person), or a local command racing a live `9vcs serve`'s incoming push,
+are different OS processes sharing no memory to synchronize through at
+all: whichever write landed last would silently win, discarding another
+command's patch from the branch with no conflict ever raised.
+
+**Fix, two parts, in `cmd/9vcs/repo.go`:**
+- **`withRefLock`**: a cross-process advisory lock using `os.O_EXCL` as
+  the actual mutex primitive (Go's stdlib has no `flock`, and this
+  project stays stdlib-only) — atomically creating a `.9vcs/lock` file
+  is the acquire, removing it is the release. A lock older than 10s is
+  assumed abandoned by a crashed process and stolen rather than
+  deadlocking forever, since the critical section it guards is always a
+  single small file read + write (milliseconds, never legitimately
+  longer). Acquisition retries for up to 5s before giving up with a
+  clear, actionable error.
+- **CAS everywhere, not just for network writes**: `setRefHashCAS`
+  (unchanged behavior — the write side of vcsfs's `/refs` contract, still
+  refuses to move the checked-out branch) and a new `setLocalRefCAS`
+  (same compare-and-swap, *without* that refusal — a local command always
+  updates the working tree and the ref together, so the rule a network
+  push needs doesn't apply) now share one implementation
+  (`casWriteRef`), and both run their entire compare-then-write sequence
+  inside `withRefLock` — not just the final write, since checking "is
+  `old` still current" and writing the new value have to be atomic
+  *together*, or two callers can both pass the check before either
+  writes. Every local mutating call site (`record`, `merge`'s
+  fast-forward, `apply`'s fast-forward, `branch`/`checkout -b`'s
+  new-branch creation, `reconcile`/`import`'s local pull) already had
+  the "old" hash it needed in scope — the value it read earlier in the
+  same function — so converting them from a blind `setRefHash` to
+  `setLocalRefCAS` needed no new bookkeeping, just routing through the
+  same compare-and-swap the network path always had. `refMu` is retired
+  entirely: the file lock subsumes it (a real cross-process primitive
+  covers everything the in-memory mutex covered, plus what it couldn't).
+
+**Verified**: `TestWithRefLockMutualExclusion` (20 goroutines, a guarded
+critical section, asserting the observed concurrent-holder count never
+exceeds 1), `TestWithRefLockStealsStaleLock`, `TestAtomicWriteFileLeavesNoTempFile`,
+`TestSetLocalRefCASConflict`/`TestSetLocalRefCASAllowsCheckedOutBranch`,
+and — the actual property this exists for —
+`TestConcurrentSetLocalRefCASOnlyOneWins`: 10 goroutines racing to move
+the same ref from the same observed old value to 10 different new
+values; exactly one succeeds, the rest fail with `errRefConflict`, and
+the ref ends up at precisely the one winner's value, never a corrupted
+or unexpected one. `go test -race ./...` clean throughout. Verified live
+against the real binary too, not just `go test`: a normal `record`
+leaves no lock file behind; a stale (backdated) lock is silently stolen
+rather than blocking; a genuinely-held lock causes a real pending change
+to be refused cleanly after the full retry window — not corrupted, not
+silently dropped — confirmed by `log` showing the same patch count
+before and after, with the identical command succeeding normally once
+the lock was released.
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:

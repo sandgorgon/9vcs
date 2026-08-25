@@ -26,7 +26,7 @@ func TestMergeAbortRestoresWorkingTreeAndClearsState(t *testing.T) {
 	ours, oursIdx := recordTestPatch(t, r, []patches.Hash{base}, "f.txt", []string{"one", "OURS", "three"}, idx)
 	theirs, _ := recordTestPatch(t, r, []patches.Hash{base}, "f.txt", []string{"one", "THEIRS", "three"}, idx)
 
-	if err := r.setRefHash(defaultBranch, ours); err != nil {
+	if err := r.setLocalRefCAS(defaultBranch, patches.Hash{}, ours); err != nil {
 		t.Fatal(err)
 	}
 	if err := writeWorkingTree(r, patches.Index{}, oursIdx); err != nil {
