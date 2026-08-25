@@ -355,7 +355,11 @@ func (r *repo) resolveRef(arg string) (patches.Hash, error) {
 }
 
 // workingFiles walks the working tree, returning repo-relative paths for
-// every regular file outside .9vcs.
+// every regular file or symlink outside .9vcs. WalkDir doesn't follow a
+// symlink to see what it points at (a symlink-to-directory is reported
+// as a plain leaf entry, never descended into), so no special handling
+// is needed there — this just has to stop excluding symlink entries
+// outright the way it used to.
 func (r *repo) workingFiles() ([]string, error) {
 	var out []string
 	err := filepath.WalkDir(r.root, func(path string, d os.DirEntry, err error) error {
@@ -375,7 +379,7 @@ func (r *repo) workingFiles() ([]string, error) {
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() {
+		if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
 			return nil
 		}
 		out = append(out, filepath.ToSlash(rel))

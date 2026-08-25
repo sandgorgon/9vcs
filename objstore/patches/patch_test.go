@@ -276,6 +276,59 @@ func TestMergeConflictResolveDiscardOneSide(t *testing.T) {
 	}
 }
 
+// TestMaterializeSymlinkAndExecutable checks Materialize's handling of
+// KindSymlink and FileChange.Executable directly against a Store — no
+// CLI involved, mirroring TestMaterializeChain's shape.
+func TestMaterializeSymlinkAndExecutable(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h1, err := store.Put(&Patch{Message: "add an executable script and a symlink", Changes: []FileChange{
+		{Path: "run.sh", Kind: KindText, TrailingNewline: true, Executable: true,
+			Ops: []LineOp{{Kind: OpInsert, ID: "a", Content: "#!/bin/sh"}}},
+		{Path: "current", Kind: KindSymlink, SymlinkTarget: "run.sh"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := Materialize(store, h1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !idx["run.sh"].Executable {
+		t.Error("run.sh should be executable after materializing")
+	}
+	if idx["current"].Kind != KindSymlink {
+		t.Fatalf("current: Kind = %v, want KindSymlink", idx["current"].Kind)
+	}
+	if idx["current"].SymlinkTarget != "run.sh" {
+		t.Errorf("current: SymlinkTarget = %q, want %q", idx["current"].SymlinkTarget, "run.sh")
+	}
+
+	// A later patch can flip the bit back off, and retarget the symlink,
+	// without anything about the line content changing.
+	h2, err := store.Put(&Patch{Dependencies: []Hash{h1}, Message: "no longer executable, retarget the symlink", Changes: []FileChange{
+		{Path: "run.sh", Kind: KindText, TrailingNewline: true, Executable: false,
+			Ops: []LineOp{{Kind: OpInsert, ID: "b", Content: "#!/bin/sh"}}},
+		{Path: "current", Kind: KindSymlink, SymlinkTarget: "run.sh.new"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx2, err := Materialize(store, h2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx2["run.sh"].Executable {
+		t.Error("run.sh should no longer be executable after the second patch")
+	}
+	if idx2["current"].SymlinkTarget != "run.sh.new" {
+		t.Errorf("current: SymlinkTarget = %q, want %q", idx2["current"].SymlinkTarget, "run.sh.new")
+	}
+}
+
 // TestUniqueChanges: two branches diverge from a shared base — one
 // deletes a path, the other edits it. UniqueChanges must report that
 // divergence precisely: each side's own delete/modify, not anything

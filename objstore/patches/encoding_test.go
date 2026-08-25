@@ -72,6 +72,50 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	})
 }
 
+// TestEncodeDecodeRoundTripExecutableAndSymlink pins format version 2's
+// new fields: FileChange.Executable (on both KindText and KindBlob) and
+// KindSymlink/SymlinkTarget.
+func TestEncodeDecodeRoundTripExecutableAndSymlink(t *testing.T) {
+	p := &Patch{
+		Message: "adds a script, a compiled tool, and a symlink",
+		Changes: []FileChange{
+			{Path: "run.sh", Kind: KindText, TrailingNewline: true, Executable: true, Ops: []LineOp{
+				{Kind: OpInsert, ID: "a", Content: "#!/bin/sh"},
+			}},
+			{Path: "bin/tool", Kind: KindBlob, Executable: true, Blob: Hash{9, 9, 9}},
+			{Path: "bin/current", Kind: KindSymlink, SymlinkTarget: "tool-v2"},
+		},
+	}
+	p.Normalize()
+	original := p.Encode()
+
+	decoded, err := Decode(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := map[string]FileChange{}
+	for _, fc := range decoded.Changes {
+		byPath[fc.Path] = fc
+	}
+	if !byPath["run.sh"].Executable {
+		t.Error("run.sh: Executable did not round-trip as true")
+	}
+	if !byPath["bin/tool"].Executable {
+		t.Error("bin/tool: Executable did not round-trip as true")
+	}
+	if byPath["bin/current"].Kind != KindSymlink {
+		t.Errorf("bin/current: Kind = %v, want KindSymlink", byPath["bin/current"].Kind)
+	}
+	if byPath["bin/current"].SymlinkTarget != "tool-v2" {
+		t.Errorf("bin/current: SymlinkTarget = %q, want %q", byPath["bin/current"].SymlinkTarget, "tool-v2")
+	}
+
+	reEncoded := decoded.Encode()
+	if string(reEncoded) != string(original) {
+		t.Fatalf("re-Encode produced different bytes:\noriginal:   %x\nre-encoded: %x", original, reEncoded)
+	}
+}
+
 func TestEncodeStartsWithFormatByte(t *testing.T) {
 	p := samplePatch()
 	p.Normalize()

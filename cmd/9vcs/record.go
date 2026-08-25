@@ -96,10 +96,23 @@ func cmdRecord(args []string) error {
 			continue
 		}
 		full := filepath.Join(r.root, filepath.FromSlash(c.Path))
-		content, err := os.ReadFile(full)
+		info, err := os.Lstat(full)
 		if os.IsNotExist(err) {
 			continue // honoring the deletion; changedFiles' KindDelete already covers it
 		}
+		if err != nil {
+			return fmt.Errorf("reading %s: %w", c.Path, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(full)
+			if err != nil {
+				return fmt.Errorf("reading symlink %s: %w", c.Path, err)
+			}
+			changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindSymlink, SymlinkTarget: target}
+			continue
+		}
+		executable := info.Mode()&0o111 != 0
+		content, err := os.ReadFile(full)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", c.Path, err)
 		}
@@ -108,11 +121,11 @@ func cmdRecord(args []string) error {
 			if err != nil {
 				return fmt.Errorf("storing blob for %s: %w", c.Path, err)
 			}
-			changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindBlob, Blob: hash}
+			changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindBlob, Blob: hash, Executable: executable}
 			continue
 		}
 		ops, _ := patches.Diff(nil, splitLines(string(content)))
-		changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindText, Ops: ops, TrailingNewline: hasTrailingNewline(content)}
+		changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindText, Ops: ops, TrailingNewline: hasTrailingNewline(content), Executable: executable}
 	}
 
 	if len(changes) == 0 && !midMerge {
