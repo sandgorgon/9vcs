@@ -1304,6 +1304,53 @@ used to say:
   as `U` mid-merge, correctly downgrading to `M` once markers were
   hand-resolved and clearing to "nothing to record" once `record`
   finalized it.
+- `9vcs merge -abort`: built and verified live. One implementation
+  abandons a merge in progress regardless of whether `merge` or `apply`
+  started it — both write the exact same `MERGE_HEAD`/`MERGE_SIDECARS`
+  state (decision #8's N-way `MERGE_HEAD` generalization is what makes
+  this correct without special-casing which command started it).
+  Recomputes exactly what was written to the working tree via the same
+  deterministic `computeMerge(head, mergeHeads...)` call `merge`/`apply`/
+  `status` already make — a pure function of its roots, so it reproduces
+  the prior write byte-for-byte without the abort path needing to have
+  remembered it — then reverses it (`writeWorkingTree(r, merged,
+  headIdx)`), removes any comparison sidecars, and clears the merge
+  state. Like `git merge --abort`, discards any hand-editing done since
+  the merge started — a full return to head, not a selective undo.
+  Verified live: a real binary conflict (which writes a sidecar file)
+  aborted cleanly, sidecar gone, working tree back to head's own content,
+  `status` reporting clean immediately after.
+- Rename detection: built and verified live, scoped deliberately as a
+  **display-time inference only** — `record` still stores a rename as a
+  plain delete of the old path plus a fresh insert under the new one,
+  byte-for-byte identical to what it stored before this feature existed.
+  No new `FileChange.Kind`, no change to the patch/graph/replay model.
+  This mirrors git's own actual behavior (no rename bit in its object
+  model either, purely a diff-time heuristic) and was the deliberate
+  choice over the alternative — a first-class move operation that
+  preserves line-graph identity across the path change, which would
+  touch `graph.go`/`linearize.go`/`replay.go`'s replay logic and merge's
+  conflict detection — a materially bigger, riskier undertaking than
+  "rename detection" was actually asking for, and not attempted here.
+  `cmd/9vcs/rename.go`'s `detectRenames` pairs a changeset's deleted
+  paths against its genuinely-new paths by content similarity (exact
+  match for binary content; for text, a symmetric overlap ratio computed
+  from the same `patches.Diff` used everywhere else in this codebase, not
+  a separate similarity algorithm — git's own 50% `-M` default reused as
+  the threshold), greedily assigning each deleted path its best match,
+  each path consumed by at most one pairing. `status` prints `R`/`R+`
+  (modified) lines for a detected pair instead of separate `D`/`A` ones;
+  `diff` (both the working-tree form and the two-ref `diffRefs` form,
+  which had to be refactored from render-immediately to
+  build-a-changes-map-first to share this) prints `renamed A -> B`, plus
+  — for a modified rename — a real diff against the old content, not the
+  insert-only ops the underlying delete+add change actually carries
+  (computed once during scoring and carried on the result so rendering
+  doesn't redo the work). Verified live: a pure rename, a rename with a
+  one-line edit (diff correctly showed only that one line, not the whole
+  file reprinted), an unrelated delete+add correctly *not* flagged as a
+  rename, and the two-ref `diffRefs` path detecting a rename made on a
+  branch relative to the branch it diverged from.
 
 ## Open items to revisit
 
