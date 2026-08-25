@@ -724,6 +724,50 @@ well past the threshold, identical content, must still be detected) and
 live: renaming a real 6,000-line file with no edits is now detected
 correctly in 16ms.
 
+#### Binary-conflict sidecar writes bypassed the symlink-traversal fix — found and fixed (2026-08-25)
+
+The same bug class as "Symlink path traversal via an intermediate
+component" above, in three sibling call sites the earlier fix didn't
+touch: `merge`/`apply`'s binary-conflict comparison sidecar (e.g.
+`logo.png.a1b2c3d4e5f6` written next to a losing side's content) and
+`merge -abort`/`record`'s cleanup of it each used a plain
+`filepath.Join(r.root, ...)` + `os.WriteFile`/`os.MkdirAll`/`os.Remove`
+— none of it routed through `os.Root`, unlike `writeWorkingTree`
+(fixed earlier for exactly this). `binaryConflictSidecar`'s path is a
+legitimate join of an already-`validPath`-checked tracked path plus a
+hash suffix — the string itself is fine; nothing about it says what
+currently sits on disk at an intermediate path component.
+
+Unlike the `writeWorkingTree` case, this one doesn't even need an
+attacker-crafted patch to trigger: an ordinary symlinked cache/vendor
+directory already sitting in the working tree, plus a completely
+mundane two-sided binary conflict at a path underneath it (e.g.
+`vendor/pwned.bin` — any real add/add or edit/edit binary conflict at
+that path), sends the sidecar write straight through the symlink and
+outside the repo. The same path is also reachable the way the earlier
+bug was — a symlink introduced by an earlier, already-recorded commit,
+sitting on disk by the time a later merge introduces a binary conflict
+underneath it.
+
+Fixed by adding `writeSidecarFile`/`removeSidecarFile` (`repo.go`),
+both opening `r.root` via `os.OpenRoot` the same way `writeWorkingTree`
+does, and switching all four call sites (`merge.go`'s sidecar write and
+its abort-time removal loop, `apply.go`'s sidecar write, `record.go`'s
+removal loop) to use them instead of the raw `os.*` calls.
+
+Verified: reproduced live against the pre-fix code first — a real
+symlink to a temp directory outside the repo, a genuine two-sided
+`MERGE_SIDECARS` state pointing through it, and the real
+`cmdMergeAbort` entrypoint (not a hand-rolled reimplementation) deleted
+a file entirely outside the repo. Reverted, re-ran against the fixed
+code: refused with `path escapes from parent`, victim file untouched.
+Permanent regression coverage in `cmd/9vcs/sidecar_test.go`:
+`TestWriteSidecarFileRefusesSymlinkPathEscape`,
+`TestRemoveSidecarFileRefusesSymlinkPathEscape` (the helpers directly),
+and `TestMergeAbortRefusesSidecarRemovalThroughSymlinkEscape` (the real
+`cmdMergeAbort` entrypoint, proving the fix is actually wired in, not
+just correct in isolation).
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:

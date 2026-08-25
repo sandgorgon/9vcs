@@ -51,8 +51,7 @@ func cmdRecord(args []string) error {
 			return fmt.Errorf("reading merge state: %w", err)
 		}
 		for _, s := range sidecars {
-			full := filepath.Join(r.root, filepath.FromSlash(s))
-			if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+			if err := removeSidecarFile(r, s); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("removing %s: %w", s, err)
 			}
 		}

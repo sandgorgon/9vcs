@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
@@ -132,11 +131,7 @@ func cmdMerge(args []string) error {
 			return fmt.Errorf("reading blob for %s: %w", c.Path, err)
 		}
 		sidecar := binaryConflictSidecar(c.Path, theirs)
-		full := filepath.Join(r.root, filepath.FromSlash(sidecar))
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(full, data, 0o644); err != nil {
+		if err := writeSidecarFile(r, sidecar, data); err != nil {
 			return fmt.Errorf("writing %s: %w", sidecar, err)
 		}
 		sidecars = append(sidecars, sidecar)
@@ -219,8 +214,7 @@ func cmdMergeAbort(r *repo) error {
 		return fmt.Errorf("merge -abort: %w", err)
 	}
 	for _, s := range sidecars {
-		full := filepath.Join(r.root, filepath.FromSlash(s))
-		if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		if err := removeSidecarFile(r, s); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("merge -abort: removing %s: %w", s, err)
 		}
 	}
