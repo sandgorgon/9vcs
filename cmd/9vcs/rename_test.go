@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
@@ -168,5 +170,42 @@ func TestDetectRenamesNoDeletesOrNoAddsIsANoop(t *testing.T) {
 	}
 	if len(remaining) != 1 {
 		t.Errorf("remaining should be untouched when nothing is detected, got %v", remaining)
+	}
+}
+
+// TestRenameCandidateSkipsExpensiveDiffForHugeFiles is the regression
+// test for a real O(n*m) time-and-memory cost (patches.Diff's
+// underlying LCS is a full 2D table, not just O(min(n,m))) that
+// detectRenames could otherwise multiply across every deleted×added
+// pair in a changeset. A pair whose line-count product exceeds
+// maxRenameDiffCells must be rejected as a candidate without attempting
+// the diff at all — checked here by using a size well over the
+// threshold and requiring the call to return quickly, not by measuring
+// memory directly.
+func TestRenameCandidateSkipsExpensiveDiffForHugeFiles(t *testing.T) {
+	big := make([]string, 6000)
+	for i := range big {
+		big[i] = fmt.Sprintf("line %d", i)
+	}
+	oldSt := textPathState(t, big)
+	newFc := newAddChange(t, "new.txt", append(append([]string{}, big...), "one more line"))
+
+	if int64(len(big))*int64(len(big)+1) <= maxRenameDiffCells {
+		t.Fatalf("test setup: %d*%d must exceed maxRenameDiffCells (%d) for this test to actually exercise the guard", len(big), len(big)+1, maxRenameDiffCells)
+	}
+
+	done := make(chan struct{})
+	var ok bool
+	go func() {
+		_, _, ok = renameCandidate("old.txt", oldSt, "new.txt", newFc)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("renameCandidate did not return quickly — the size guard doesn't seem to be short-circuiting before the diff")
+	}
+	if ok {
+		t.Error("expected the oversized pair to be rejected as a candidate, got a match")
 	}
 }

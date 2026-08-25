@@ -41,14 +41,48 @@ func (s *rawStore) put(data []byte) (Hash, error) {
 	if _, err := os.Stat(path); err == nil {
 		return h, nil // already have it
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return Hash{}, err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o444); err != nil {
+	// A unique-per-call temp name (os.CreateTemp), not a fixed
+	// path+".tmp" derived only from the content hash — two concurrent
+	// put calls for the *same* content (same hash) is a real, reachable
+	// race (two peer connections relaying the same patch to one `serve`
+	// process at once, each its own goroutine), and a shared fixed temp
+	// name meant one writer could open/create/rename it out from under
+	// the other — observed live as a spurious "permission denied" (the
+	// first writer's 0o444 file already sitting at that exact path when
+	// the second tried to create it) before this fix, on an otherwise
+	// completely harmless race: the content two concurrent callers write
+	// here is identical by construction (same hash).
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return Hash{}, err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	tmpName := tmp.Name()
+	_, writeErr := tmp.Write(data)
+	closeErr := tmp.Close()
+	if writeErr != nil {
+		os.Remove(tmpName)
+		return Hash{}, writeErr
+	}
+	if closeErr != nil {
+		os.Remove(tmpName)
+		return Hash{}, closeErr
+	}
+	if err := os.Chmod(tmpName, 0o444); err != nil {
+		os.Remove(tmpName)
+		return Hash{}, err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		// A concurrent writer for this same hash may have already put
+		// the real file in place between our Stat and here — that's
+		// success, not failure, for content-addressed, idempotent Put.
+		if _, statErr := os.Stat(path); statErr == nil {
+			return h, nil
+		}
 		return Hash{}, err
 	}
 	return h, nil
