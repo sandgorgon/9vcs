@@ -277,6 +277,20 @@ Trunk-based, short-lived branches:
   it lands — `master`'s history stays one squashed commit per PR, no
   merge commits.
 
+## Versioning and compatibility
+
+9vcs follows [semver](https://semver.org/) for its own releases
+(`v0.x.y` for now). Below `v1.0.0`, there's no compatibility promise on
+the on-disk patch/bundle format between releases — it may change in
+place, without a migration path, the same way it did a couple of times
+before this project's first tag. `v1.0.0` is when that changes: from
+then on, any patch or bundle recorded under a released format stays
+decodable, and a future incompatible change gets real version-dispatch
+handling plus its own migration tooling shipped alongside it, not a
+silent in-place swap. See [PLAN.md](PLAN.md)'s "Release versioning"
+write-up for the full reasoning, and [CHANGELOG.md](CHANGELOG.md) for
+what's actually shipped in each release.
+
 ## Learn more
 
 [PLAN.md](PLAN.md) has the full design: why patches instead of
