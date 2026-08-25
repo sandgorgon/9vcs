@@ -20,6 +20,7 @@ func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	maxConns := fs.Int("max-conns", 64, "reject new connections once this many are live at once")
 	maxConnsPerIPPerMin := fs.Int("max-conns-per-ip-per-min", 30, "reject a remote address's new connections once it exceeds this many within a minute")
+	maxRequestsPerConn := fs.Int("max-requests-per-conn", 16, "cap how many requests from one connection are dispatched at once (0 = unlimited); a client can still pipeline more, they just wait for a slot")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -74,6 +75,14 @@ func cmdServe(args []string) error {
 		// whatever the library's default happens to be release to
 		// release, instead of a value this command actually chose.
 		Msize: p9.DefaultMsize,
+		// MaxConcurrentRequests (9p v0.5.0+) is decision #7's "per-
+		// connection concurrent-request cap" — a single connection can
+		// otherwise pipeline unboundedly many requests without waiting
+		// for replies (9P2000's own tag-multiplexing) and drive the
+		// server into spawning a concurrent handler for each. Tflush
+		// stays exempt from this at the library level, so a client can
+		// still cancel a request holding a slot even at the cap.
+		MaxConcurrentRequests: uint32(*maxRequestsPerConn),
 		// ConnContext is what replaces the hand-rolled accept loop this
 		// command used before v0.2.0: Serve itself now TLS-handshakes
 		// each connection (via tlsListener below) and calls this once per

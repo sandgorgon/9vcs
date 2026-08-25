@@ -718,13 +718,16 @@ and re-pinning to recover.
 Resolved along the way, superseding what the original open items below
 used to say:
 
-- `client.Create`/`Client.Create` (github.com/sandgorgon/9p v0.3.0) and
+- `client.Create`/`Client.Create` (github.com/sandgorgon/9p v0.3.0),
   `Tclunk`/`Tremove` now propagating `File.Close`'s error instead of
-  discarding it (v0.4.0) were both found to be missing/broken while
-  building this, specced and reported upstream, fixed there, and
-  adopted here — `go.mod` is on v0.4.0. reconcile's push path trusts
-  `Close`'s returned error directly as of v0.4.0; no read-back
-  verification workaround was needed once it landed.
+  discarding it (v0.4.0), and `Server.MaxConcurrentRequests` (v0.5.0,
+  decision #7's per-connection concurrent-request cap) were all found
+  missing while building this, specced and reported upstream, fixed
+  there, and adopted here — `go.mod` is on v0.5.0. reconcile's push path
+  trusts `Close`'s returned error directly as of v0.4.0; no read-back
+  verification workaround was needed once it landed. See Status for the
+  full v0.5.0 story, including a real deadlock the spec's own first
+  draft would have introduced, caught before implementation.
 
 - Patch encoding: `Patch.Dependencies []Hash` (a real DAG, not a single
   parent), `LineOp{Kind, ID, Prev, Next, Content}` as explicit graph
@@ -748,8 +751,39 @@ used to say:
   pinned explicitly to `p9.DefaultMsize` rather than left at the zero
   value (the library already defaults there, but now it's this
   command's own choice, not an incidental one). A per-connection
-  concurrent-request cap — decision #7's "phase-2 if needed" — is still
-  deliberately not built.
+  concurrent-request cap — decision #7's "phase-2 if needed" — is now
+  built too: specced as `Server.MaxConcurrentRequests` (mirrors
+  `golang.org/x/net/http2.Server.MaxConcurrentStreams`) since 9vcs
+  couldn't add this from outside the library — `server.Server.Serve`/
+  `ServeConn` all bottom out in an unexported `conn.serve()` loop that
+  spawned an unconditional goroutine per incoming request, no hook to
+  throttle it, and 9P2000's own tag-multiplexing lets one connection
+  have unboundedly many requests in flight regardless of a connection
+  cap. The library landed it in v0.5.0 (2026-08-24), and it's a
+  materially better design than the spec's own first draft proposed: an
+  early draft would have had `serve()`'s read loop block synchronously
+  on the semaphore, which deadlocks — a `Tflush` for an already-running
+  request queued behind a second, still-waiting request could never be
+  read, so the slot it would free never frees, so the connection wedges
+  permanently (worse than the original problem, since there's then no
+  client-driven way out). The shipped fix keeps spawning a goroutine per
+  request unconditionally, moves slot acquisition into that goroutine as
+  a `select` against the request's own `ctx`, and exempts `Tflush`
+  entirely from the limit — verified by both reading `conn.go`'s
+  `dispatchOne` directly and running the library's own
+  `TestMaxConcurrentRequestsTflushReachesInFlightRequestAtCap`, the
+  exact regression case, before adopting it. `go.mod` bumped to v0.5.0;
+  `cmd/9vcs/serve.go` gained a new `-max-requests-per-conn` flag
+  (default 16) passed straight through, verified live (ordinary
+  serve/import still works under the new default). Doc comment worth
+  restating since it changed what the feature actually guarantees: it
+  bounds concurrent dispatch into the backend, not the number of
+  goroutines or pending requests a connection can accumulate — a client
+  pipelining far ahead of the server still produces one parked,
+  backend-untouched goroutine per pending request until a slot frees or
+  it's flushed. Bounding *that* buildup (a queue-depth cap, or an
+  idle/read timeout) is explicitly out of scope for this feature, left
+  as a separate concern if it ever turns out to matter.
 - `synth/`: built, as its own package (matching the originally proposed
   module layout — see "Resolved" below for where it diverges), and
   wired into every `cmd/9vcs` command via a `repo.materialize` method
@@ -841,6 +875,25 @@ used to say:
   `TestPatchWriteSignedAuthorshipAccepted` cover the same over a real 9P
   connection, confirming a forged claim is refused before it's ever
   stored under any hash.
+- Import/reconcile fingerprint cross-check: built and verified live —
+  the informational signal decision #1's Author identity subsection
+  floated (does a fetched patch's own `AuthorFingerprint` match the
+  fingerprint this connection already TLS-verified, or is the peer
+  relaying someone else's patch). `dialPeer` (`sync.go`) now returns the
+  verified peer fingerprint alongside the client; `importClosure` takes
+  it and classifies every newly-fetched patch into one of
+  authored-by-this-peer / relayed-from-elsewhere / unsigned
+  (`importStats`), purely informational — it never changes whether a
+  patch is accepted, independent of and additional to
+  `VerifyAuthorSignature`'s forged-claim refusal. `import`/`reconcile`
+  print one summary line only when something was actually fetched (a
+  no-op "already up to date" run stays silent, matching the
+  not-noisy-by-default stance the subsection called for). Verified live
+  over real TLS+9P with four distinct identities: a direct import from
+  the authoring peer correctly reports "authored by this peer"; the same
+  patch relayed through a second peer (imported there first, then pushed
+  onward to a third under a different ref) correctly reports "relayed
+  from elsewhere" when a fourth peer pulls it from the relay.
 - Bundle export/import: built and verified live, exactly as scoped under
   decision #8. New `bundle/` package (`Export`, `Decode`, `Bundle.Verify`,
   `Bundle.Store`) plus `cmd/9vcs/bundle.go`'s `export`/`show`/`import`
@@ -968,11 +1021,10 @@ used to say:
   anything (all-or-nothing — a forged claim anywhere in the bundle
   refuses the whole import), independent of the bundle's own signer
   signature checked by `Bundle.Verify` — this closed a real gap where
-  bundle import had been built without it. Still not built on top of
-  this: the import/reconcile cross-check against the TLS-verified peer's
-  own fingerprint (still floated as deferred UX in decision #1's Author
-  identity subsection — distinct from and additional to the
-  forged-signature refusal that *is* built everywhere else).
+  bundle import had been built without it. The import/reconcile
+  cross-check against the TLS-verified peer's own fingerprint (floated
+  as deferred UX in decision #1's Author identity subsection) is now
+  built too — see Status.
 - iOS build: checked from this Linux dev environment, and it cannot be
   done here — not a gap in this codebase (neither it nor
   `sandgorgon/9p` uses cgo, confirmed by grepping both for `import

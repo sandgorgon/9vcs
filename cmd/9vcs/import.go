@@ -25,7 +25,7 @@ func cmdImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	c, err := dialPeer(*fingerprint, addr)
+	c, peerFingerprint, err := dialPeer(*fingerprint, addr)
 	if err != nil {
 		return fmt.Errorf("import: %w", err)
 	}
@@ -36,9 +36,11 @@ func cmdImport(args []string) error {
 		return fmt.Errorf("import: %w", err)
 	}
 
-	if err := importClosure(c, r.store, r.blobs, remoteHash); err != nil {
+	stats, err := importClosure(c, r.store, r.blobs, remoteHash, peerFingerprint)
+	if err != nil {
 		return fmt.Errorf("import: %w", err)
 	}
+	printImportStats(stats, peerFingerprint)
 
 	localHash, _, err := r.refHash(localName)
 	if err != nil {

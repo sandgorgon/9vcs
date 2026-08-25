@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/ed25519"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -15,8 +16,11 @@ import (
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
-// dialPeer connects to addr over TLS and attaches to its root. Shared by
-// import and reconcile — both start a connection exactly the same way.
+// dialPeer connects to addr over TLS and attaches to its root, returning
+// the peer's verified fingerprint alongside the client — import/reconcile
+// use it to cross-check a fetched patch's own AuthorFingerprint (see
+// importClosure). Shared by import and reconcile — both start a
+// connection exactly the same way.
 //
 // pinnedFingerprint, if non-empty (the caller passed -peer-fingerprint),
 // is an explicit one-off pin: the peer must present exactly that
@@ -27,29 +31,33 @@ import (
 // PLAN.md's "known-peers store with TOFU semantics" (known_hosts
 // behavior). Either a successful pin or a successful first-connect
 // prompt is remembered in known-peers, so later calls don't need either.
-func dialPeer(pinnedFingerprint, addr string) (*client.Client, error) {
+func dialPeer(pinnedFingerprint, addr string) (*client.Client, string, error) {
 	id, err := identity.Load()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	knownPeersPath, err := identity.KnownPeersPath()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	known, err := identity.LoadKnownPeers(knownPeersPath)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// tls.Config.VerifyPeerCertificate's callback only reports accept/
 	// refuse as a bool; verifyErr carries the specific reason back out so
 	// the caller sees more than TLS's generic handshake failure.
+	// peerFingerprint captures what was actually verified, for the
+	// caller to use once the handshake succeeds.
 	var verifyErr error
+	var peerFingerprint string
 	accept := func(presented string) bool {
 		if err := verifyPeer(knownPeersPath, known, addr, pinnedFingerprint, presented, os.Stdin); err != nil {
 			verifyErr = err
 			return false
 		}
+		peerFingerprint = presented
 		return true
 	}
 
@@ -57,20 +65,20 @@ func dialPeer(pinnedFingerprint, addr string) (*client.Client, error) {
 	conn, err := tls.Dial("tcp", addr, tlsCfg)
 	if err != nil {
 		if verifyErr != nil {
-			return nil, verifyErr
+			return nil, "", verifyErr
 		}
-		return nil, fmt.Errorf("connecting to %s: %w", addr, err)
+		return nil, "", fmt.Errorf("connecting to %s: %w", addr, err)
 	}
 	c, err := client.NewClient(conn)
 	if err != nil {
 		conn.Close()
-		return nil, err
+		return nil, "", err
 	}
 	if _, err := c.Attach("client", ""); err != nil {
 		c.Close()
-		return nil, fmt.Errorf("attaching to %s: %w (the peer may have rejected this connection's certificate — check its authorized-peers)", addr, err)
+		return nil, "", fmt.Errorf("attaching to %s: %w (the peer may have rejected this connection's certificate — check its authorized-peers)", addr, err)
 	}
-	return c, nil
+	return c, peerFingerprint, nil
 }
 
 // verifyPeer decides whether to trust addr's presented fingerprint,
@@ -247,6 +255,18 @@ func decodeRefFile(f *client.File, name string) (patches.Hash, error) {
 	return h, nil
 }
 
+// importStats summarizes what importClosure actually fetched, including
+// the AuthorFingerprint-vs-peer-connection cross-check PLAN.md's Author
+// identity subsection calls for: informational only, never a refusal —
+// relaying through a shared hub is completely normal, not suspicious on
+// its own, so this is reported, not warned about per-patch.
+type importStats struct {
+	Fetched        int
+	AuthoredByPeer int // signed, and by the fingerprint this connection verified
+	Relayed        int // signed, but by a different fingerprint — the peer is relaying someone else's patch
+	Unsigned       int
+}
+
 // importClosure fetches root and everything it transitively depends on
 // (patches, and any blobs a fetched patch's KindBlob changes reference)
 // that isn't already present locally, verifying each object's content
@@ -254,7 +274,14 @@ func decodeRefFile(f *client.File, name string) (patches.Hash, error) {
 // Content addressing is what makes this a plain recursive pull with no
 // separate have/want negotiation: "do I have this hash" is the only
 // question that ever needs asking, and Store.Has answers it locally.
-func importClosure(c *client.Client, store *patches.Store, blobs *patches.BlobStore, root patches.Hash) error {
+//
+// peerFingerprint is this connection's already-TLS-verified peer
+// identity (from dialPeer) — cross-checked against each newly-fetched
+// patch's own AuthorFingerprint (already independently verified by
+// fetchPatch's VerifyAuthorSignature call) purely for the returned
+// importStats; it never changes whether a patch is accepted.
+func importClosure(c *client.Client, store *patches.Store, blobs *patches.BlobStore, root patches.Hash, peerFingerprint string) (importStats, error) {
+	var stats importStats
 	seen := map[patches.Hash]bool{}
 	var walk func(h patches.Hash) error
 	walk = func(h patches.Hash) error {
@@ -268,6 +295,15 @@ func importClosure(c *client.Client, store *patches.Store, blobs *patches.BlobSt
 		p, err := fetchPatch(c, store, h)
 		if err != nil {
 			return err
+		}
+		stats.Fetched++
+		switch {
+		case p.AuthorFingerprint == ([32]byte{}):
+			stats.Unsigned++
+		case identity.Fingerprint(ed25519.PublicKey(p.AuthorFingerprint[:])) == peerFingerprint:
+			stats.AuthoredByPeer++
+		default:
+			stats.Relayed++
 		}
 		for _, dep := range p.Dependencies {
 			if err := walk(dep); err != nil {
@@ -283,7 +319,21 @@ func importClosure(c *client.Client, store *patches.Store, blobs *patches.BlobSt
 		}
 		return nil
 	}
-	return walk(root)
+	err := walk(root)
+	return stats, err
+}
+
+// printImportStats prints the AuthorFingerprint-vs-peer cross-check
+// summary, but only when there was anything to say: a no-op fetch (every
+// object was already present locally) prints nothing, matching the
+// "informational, not noisy" stance — relaying is the common case, and a
+// line on every single up-to-date check would just be clutter.
+func printImportStats(stats importStats, peerFingerprint string) {
+	if stats.Fetched == 0 {
+		return
+	}
+	fmt.Printf("fetched %d patch(es) from %s: %d authored by this peer, %d relayed from elsewhere, %d unsigned\n",
+		stats.Fetched, peerFingerprint[:12], stats.AuthoredByPeer, stats.Relayed, stats.Unsigned)
 }
 
 func fetchPatch(c *client.Client, store *patches.Store, hash patches.Hash) (*patches.Patch, error) {

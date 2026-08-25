@@ -36,7 +36,7 @@ func cmdReconcile(args []string) error {
 	if err != nil {
 		return err
 	}
-	c, err := dialPeer(*fingerprint, addr)
+	c, peerFingerprint, err := dialPeer(*fingerprint, addr)
 	if err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
@@ -61,9 +61,11 @@ func cmdReconcile(args []string) error {
 	// there's nothing new — including the "we're actually ahead" case,
 	// where this just confirms it cheaply rather than transferring
 	// anything.
-	if err := importClosure(c, r.store, r.blobs, remoteHash); err != nil {
+	stats, err := importClosure(c, r.store, r.blobs, remoteHash, peerFingerprint)
+	if err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
+	printImportStats(stats, peerFingerprint)
 
 	dir, err := classify(r, localHash, remoteHash)
 	if err != nil {
