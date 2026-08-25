@@ -743,11 +743,26 @@ const MaxObjectSize = 1 << 30 // 1 GiB
 // checkWriteSize rejects a write before its caller ever attempts to grow
 // a buffer to fit it: a negative offset (reachable when a peer sends an
 // unsigned 9P offset large enough to wrap into a negative int64, which
-// would otherwise panic on the later slice expression buf[offset:]) or
-// an offset+len(p) beyond MaxObjectSize.
+// would otherwise panic on the later slice expression buf[offset:]), an
+// offset alone already beyond MaxObjectSize (checked before the addition
+// below, not just after it — see the next paragraph), or an
+// offset+len(p) beyond MaxObjectSize.
+//
+// The offset-alone check matters on its own: without it, a single Twrite
+// with offset near math.MaxInt64 makes offset+int64(len(p)) overflow and
+// wrap around to a large *negative* number, which then passes the
+// end > MaxObjectSize check (a negative number is never greater than a
+// positive limit) — silently accepting an enormous offset instead of
+// rejecting it. The caller then does buf[offset:] with that same huge
+// offset against a small buffer, which panics; every 9P request runs in
+// its own goroutine with no panic recovery anywhere in
+// github.com/sandgorgon/9p's server package, so one such write crashes
+// the entire server process, taking down every connection, not just the
+// offending one — reachable by any connected peer at even the weakest
+// trust tier (PermPropose, via /offers).
 func checkWriteSize(offset int64, p []byte) error {
-	if offset < 0 {
-		return fmt.Errorf("vcsfs: negative write offset %d", offset)
+	if offset < 0 || offset > MaxObjectSize {
+		return fmt.Errorf("vcsfs: write offset %d is beyond the %d-byte limit", offset, MaxObjectSize)
 	}
 	end := offset + int64(len(p))
 	if end > MaxObjectSize {

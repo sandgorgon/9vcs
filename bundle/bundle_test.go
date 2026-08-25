@@ -1,6 +1,7 @@
 package bundle
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
@@ -261,5 +262,37 @@ func TestDecodeRejectsUnrecognizedVersion(t *testing.T) {
 	data = append(data, 99) // unrecognized version byte
 	if _, err := Decode(data); err == nil {
 		t.Fatal("expected an error decoding an unrecognized format version, got nil")
+	}
+}
+
+// TestDecodeRejectsPatchCountNotBackedByMinEntrySize is a regression for
+// an allocation-amplification gap: readCount used to validate a count
+// only against total bytes remaining, not against how many bytes one
+// element of the claimed count actually needs at minimum. A patch count
+// that fit within the bytes remaining (so the old bound would have
+// accepted it) but wasn't actually enough bytes to back that many
+// entries — each needs at least its own 8-byte length prefix — used to
+// pass, forcing `make([]*patches.Patch, 0, nPatches)` to over-allocate
+// before the per-entry reads ran out of buffer and failed anyway. Now
+// rejected immediately by readCount itself, before any allocation.
+func TestDecodeRejectsPatchCountNotBackedByMinEntrySize(t *testing.T) {
+	var buf bytes.Buffer
+	buf.Write(fileMagic[:])
+	buf.WriteByte(formatVersion)
+	buf.Write(make([]byte, ed25519.PublicKeySize))
+	buf.Write(make([]byte, ed25519.SignatureSize))
+
+	// Payload: an empty message, then a patch count of 50 backed by only
+	// 50 bytes remaining. Each patch entry needs at least 8 bytes (its
+	// own length prefix) to exist at all, so 50 entries need 400 bytes —
+	// the old bound (50 <= 50 remaining) would have accepted this.
+	var payload bytes.Buffer
+	writeInt64(&payload, 0) // empty message
+	writeInt64(&payload, 50)
+	payload.Write(make([]byte, 50))
+	buf.Write(payload.Bytes())
+
+	if _, err := Decode(buf.Bytes()); err == nil {
+		t.Fatal("expected an error decoding a patch count not backed by enough bytes for minPatchEntrySize, got nil")
 	}
 }

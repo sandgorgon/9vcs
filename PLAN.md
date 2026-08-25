@@ -1004,6 +1004,117 @@ removed after the same audit flagged its remaining O(deleted × added)
 candidate-pair cost as not worth carrying for a purely cosmetic,
 display-time feature.
 
+#### `checkWriteSize` integer overflow — a single message could crash the whole server, found and fixed (2026-08-25)
+
+Found by a code review of the fixes above's own commit, not the original
+audit — the reviewer traced it all the way to an unrecovered panic,
+which is why this one got fixed immediately rather than staying a
+"gap to revisit." `checkWriteSize` (`vcsfs/vcsfs.go`) checked `offset <
+0`, then computed `end := offset + int64(len(p))` and checked `end >
+MaxObjectSize` — but never checked `offset` alone against
+`MaxObjectSize` first. A `Twrite` with `offset` near `math.MaxInt64`
+makes that addition overflow and wrap around to a large *negative*
+number, which is never greater than a positive limit — so the check
+passed, silently accepting the write. The caller (`writeFile.Write`/
+`refFile.Write`) then did `f.buf[offset:]` with that same huge offset
+against a small buffer, which panics. Every 9P request runs in its own
+goroutine (`server/conn.go`'s `dispatchOne`/`handle`) with no
+`recover()` anywhere in `github.com/sandgorgon/9p`'s server package, so
+one such write — reachable by any connected peer at even the weakest
+trust tier, `PermPropose` via `/offers` — crashed the entire `9vcs
+serve` process, taking down every connection, not just the offending
+one. Fixed by checking `offset > MaxObjectSize` before ever computing
+`end`, closing the overflow window entirely (once `offset` itself is
+bounded to at most 1 GiB, adding a 9P-message-sized `len(p)` to it can't
+overflow int64). Verified by `TestWriteRejectsOverflowingOffset`
+(`vcsfs/vcsfs_write_test.go`) — checked directly against
+`checkWriteSize`, not over the network, since the panic itself would
+kill the test process rather than just fail the test.
+
+#### N-way conflict detection still missed a cross-kind mismatch — found and fixed (2026-08-25)
+
+Also found by the same code review, in the "N-way `apply`/`merge`
+silently dropped a binary/symlink conflict" fix above — a real gap left
+by that fix, not a new one introduced by it (the pre-fix code had the
+same blind spot too, just less visibly). The rewritten loop picks an
+"anchor" root (the first root, in order, that has the path at all) and
+compares every *other* root's value against it — but only within a
+`switch anchorSt.Kind` that had cases for `KindBlob`/`KindSymlink`
+alone. A root whose value is present but under a *different* Kind
+entirely (e.g. the anchor is text, another root replaced the same path
+with a binary blob) matched neither case, so it was silently ignored —
+`Materialize`'s union again just picked a side with no conflict
+reported, discarding the other. Worse than a cosmetic gap:
+`merge.go`/`apply.go`'s "binary" conflict handling assumes the
+conflicting side really is a `KindBlob` `PathState` with a real `Blob`
+hash to fetch for the comparison sidecar, so naively labeling a
+text-vs-blob mismatch "binary" would have fed it a zero-value `Hash`
+and failed with a confusing store-lookup error instead of a clean
+conflict report.
+Fixed by checking for a **kind mismatch** first, across every root that
+has the path, before any same-kind value comparison — and giving it its
+own conflict kind, `"type"` (`mergeConflict.Kind`), so it's never
+conflated with `"binary"`/`"symlink"` and never reaches the
+Blob-assuming sidecar code in `merge.go`/`apply.go` (both gained a
+`case "type":` in their conflict-printing switch; the sidecar-writing
+loops already only run `if c.Kind == "binary"`, so `"type"` is
+automatically excluded from them, no separate change needed there).
+Verified by `TestComputeMergeThreeWayTypeMismatchConflict`
+(`cmd/9vcs/mergeutil_test.go`): root a introduces a path as text, root b
+introduces the same path as a binary blob — must be flagged as a `type`
+conflict and keep root a's text content, not whichever `Materialize`'s
+union happened to pick.
+
+#### `readCount`'s per-count bound didn't account for per-element size — hardened, allocation-amplification, in both `objstore/patches` and `bundle` (2026-08-25)
+
+Escalated from "low severity, deliberate tradeoff, not worth fixing on
+its own" (noted but deliberately left alone during the audit above) to
+"fix it" after working through the actual worst case with the user:
+`readCount` (`objstore/patches/patch.go`) validated a length-prefixed
+count only against total bytes remaining in the reader — `n >
+int64(r.Len())` — not against how many bytes one *element* of that count
+actually needs. For `nOps` (each `LineOp` is ~72 bytes: a kind byte plus
+four length-prefixed strings), a claim near the raw byte count remaining
+could demand a `make([]LineOp, 0, nOps)` allocation up to ~72x larger
+than the actual input could ever legitimately back — and Go's answer to
+an allocation request that large failing is a *fatal*, unrecoverable
+runtime error (`runtime: out of memory`), not a normal panic `recover()`
+catches. Concretely: an attacker sends a patch object up to
+`MaxObjectSize` (1 GiB, already permitted at the weakest trust tier) —
+minimal headers, then a crafted `nOps` claiming close to 1 billion while
+nearly the whole buffer is still "remaining" — and the server attempts a
+single ~72 GB allocation, which crashes the whole `9vcs serve` process
+on essentially any real machine. Same shape of bug as the write-offset
+allocation fixed earlier the same day, just costing the attacker real
+bytes proportional to the target allocation divided by ~72 instead of a
+2-byte write with a fake offset.
+
+Fixed by giving `readCount` a `minElemSize` parameter — the fewest bytes
+any single element's encoding can possibly take (1 for a raw byte count
+like a string's; `hashSize` (32) for a `Dependencies` count;
+`minFileChangeSize` (59: every `FileChange` field's own minimum
+encoding, including a zero-length path/symlink-target string and a
+zero-op-count) for a changes count; `minLineOpSize` (33: a kind byte
+plus four zero-length strings) for an ops count) — and checking `n >
+int64(r.Len())/minElemSize` instead of `n > int64(r.Len())`. A count
+that passes this bound is always backed by enough remaining bytes to
+actually encode that many elements, even in the smallest legal case, so
+the resulting allocation can never exceed what the input could
+legitimately justify. `bundle/bundle.go` had an independent (not
+shared) copy of the identical `readCount` helper with the identical
+gap — `nPatches`/`nBlobs` bounded only against raw remaining bytes, not
+each entry's own minimum size (`minPatchEntrySize` = 8, its own length
+prefix; `minBlobEntrySize` = 40, a fixed Hash plus its own length
+prefix) — fixed the same way for consistency, since a `.9vp` bundle file
+is exactly as untrusted an input as a patch fetched over the wire.
+Verified by `TestDecodeRejectsDependencyCountNotBackedByHashSize`
+(`objstore/patches/encoding_test.go`) and
+`TestDecodeRejectsPatchCountNotBackedByMinEntrySize`
+(`bundle/bundle_test.go`): each crafts a count that the *old* bound
+would have accepted (count ≤ bytes remaining) but the fixed bound
+correctly rejects (not enough bytes remaining for that count at the
+type's real minimum size).
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"io"
+	"math"
 	"net"
 	"testing"
 
@@ -260,6 +261,30 @@ func TestWriteRejectsOversizedOffset(t *testing.T) {
 	// server still tries to honor the claimed offset regardless.
 	if _, err := f.WriteAt([]byte("hi"), MaxObjectSize+1); err == nil {
 		t.Error("expected a write past MaxObjectSize to be rejected, got nil")
+	}
+}
+
+// TestWriteRejectsOverflowingOffset is the regression test for a real,
+// crash-level vulnerability: checkWriteSize computed offset+len(p)
+// without first checking offset alone against MaxObjectSize, so an
+// offset near math.MaxInt64 made that addition overflow and wrap around
+// to a large *negative* number — which then passed the `end >
+// MaxObjectSize` check (a negative number is never greater than a
+// positive limit), silently accepting the write. The caller then did
+// buf[offset:] with that same huge offset against a small buffer, which
+// panics — and every 9P request runs in its own goroutine with no panic
+// recovery anywhere in github.com/sandgorgon/9p's server package, so
+// this crashed the entire server process (every connection, not just
+// the offending one), reachable by any connected peer at even the
+// weakest trust tier. Verified directly against checkWriteSize, not
+// through the network — the panic this guards against would kill the
+// test process itself, not just fail the test.
+func TestWriteRejectsOverflowingOffset(t *testing.T) {
+	if err := checkWriteSize(math.MaxInt64-5, []byte("0123456789")); err == nil {
+		t.Error("expected an offset near math.MaxInt64 (whose sum with len(p) overflows) to be rejected, got nil")
+	}
+	if err := checkWriteSize(math.MaxInt64, nil); err == nil {
+		t.Error("expected offset == math.MaxInt64 to be rejected even with an empty payload, got nil")
 	}
 }
 

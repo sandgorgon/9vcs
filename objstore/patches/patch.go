@@ -20,6 +20,35 @@ import (
 // Hash is a SHA-256 content hash.
 type Hash [32]byte
 
+// hashSize is a Hash's fixed encoded size — used as readCount's
+// minElemSize when the count being validated is a number of Hashes
+// (Dependencies), so a claimed count is never accepted unless the
+// buffer actually has enough remaining bytes to hold that many.
+const hashSize = 32
+
+// minFileChangeSize/minLineOpSize are the fewest bytes any single
+// legally-shaped FileChange/LineOp encoding can possibly take — used as
+// readCount's minElemSize for Decode's change/op counts. Each is the sum
+// of every field's own minimum encoding: a length-prefixed string's
+// minimum is 8 bytes (its own length prefix) plus 0 content bytes (an
+// empty string is a structurally valid encoding, even where a later
+// semantic check like validPath would go on to reject the empty path it
+// decodes to — readCount only needs a structural lower bound, not a
+// semantic one). See readCount's doc comment for why this matters:
+// without it, a claimed count near the raw byte count remaining could
+// demand a make() allocation far larger than the input could ever
+// legitimately back.
+//
+// minFileChangeSize: path string (8) + kind byte (1) + trailingNewline
+// bool (1) + executable bool (1) + blob Hash (32, fixed-size, always
+// read regardless of Kind) + symlinkTarget string (8) + ops count field
+// itself (8, even when nOps == 0).
+const minFileChangeSize = 8 + 1 + 1 + 1 + hashSize + 8 + 8
+
+// minLineOpSize: op kind byte (1) + four length-prefixed strings (id,
+// prev, next, content), 8 bytes each for just their length prefix.
+const minLineOpSize = 1 + 8 + 8 + 8 + 8
+
 func (h Hash) String() string { return hex.EncodeToString(h[:]) }
 
 // IsZero reports whether h is the zero hash, used as the parent of a root patch.
@@ -316,7 +345,7 @@ func Decode(data []byte) (*Patch, error) {
 		return nil, fmt.Errorf("patch: unrecognized format byte %d (want %d) — pre-release, so this is almost certainly stale data from before a format change, not a version to support", v, patchFormatVersion)
 	}
 	p := &Patch{}
-	nDeps, err := readCount(r, "patch: decode dependency count")
+	nDeps, err := readCount(r, hashSize, "patch: decode dependency count")
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +370,7 @@ func Decode(data []byte) (*Patch, error) {
 		return nil, fmt.Errorf("patch: decode message: %w", err)
 	}
 	p.Message = msg
-	nChanges, err := readCount(r, "patch: decode change count")
+	nChanges, err := readCount(r, minFileChangeSize, "patch: decode change count")
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +403,7 @@ func Decode(data []byte) (*Patch, error) {
 		if err != nil {
 			return nil, fmt.Errorf("patch: decode change %d symlink target: %w", i, err)
 		}
-		nOps, err := readCount(r, fmt.Sprintf("patch: decode change %d op count", i))
+		nOps, err := readCount(r, minLineOpSize, fmt.Sprintf("patch: decode change %d op count", i))
 		if err != nil {
 			return nil, err
 		}
@@ -422,7 +451,7 @@ func Decode(data []byte) (*Patch, error) {
 }
 
 func readString(r *bytes.Reader) (string, error) {
-	n, err := readCount(r, "patch: decode string length")
+	n, err := readCount(r, 1, "patch: decode string length")
 	if err != nil {
 		return "", err
 	}
@@ -434,24 +463,34 @@ func readString(r *bytes.Reader) (string, error) {
 }
 
 // readCount reads a length-prefixed count or size and validates it
-// against how many bytes actually remain in r before returning. Every
+// against how many elements could plausibly still fit in the bytes
+// remaining in r, given minElemSize — the minimum number of bytes any
+// single element's own encoding can possibly take (1 for a raw byte
+// count like readString's, 32 for a Hash, or a small fixed floor for a
+// multi-field struct like FileChange/LineOp; see each call site). Every
 // count that goes on to size a make() — a slice length/capacity, or
 // readString's buffer — is read through this, not readInt64 directly,
 // so corrupted or adversarial input (e.g. a patch fetched over the
 // network, or decoded from a shared bundle file) produces a clean
-// decode error instead of an out-of-range allocation panic. This is a
-// loose bound (it doesn't account for each element's real size, just
-// caps the count at the raw byte count remaining), which is enough:
-// it's what stands between a corrupted length field and make() trying
-// to allocate an absurd amount, not a precise validity check — a count
-// that passes this but is still too large for what follows fails
-// cleanly at the next read instead.
-func readCount(r *bytes.Reader, what string) (int64, error) {
+// decode error instead of an oversized or out-of-range allocation.
+//
+// Bounding against raw remaining bytes alone (n > r.Len(), what this
+// used to check) is not enough when one element costs far more than one
+// byte to encode: a count near r.Len() then claims far more elements
+// than the buffer could actually hold data for, and make() dutifully
+// tries to allocate minElemSize-times more memory than the input could
+// ever legitimately need — up to ~72x for a LineOp (four length-prefixed
+// strings plus a kind byte), transiently, before the next read runs out
+// of buffer and the whole Decode call fails. Dividing by minElemSize
+// closes that gap: a count this permits is always backed by enough
+// remaining bytes to actually encode that many elements, even in the
+// smallest legal case.
+func readCount(r *bytes.Reader, minElemSize int64, what string) (int64, error) {
 	n, err := readInt64(r)
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", what, err)
 	}
-	if n < 0 || n > int64(r.Len()) {
+	if n < 0 || n > int64(r.Len())/minElemSize {
 		return 0, fmt.Errorf("%s: implausible length %d (%d bytes remain)", what, n, r.Len())
 	}
 	return n, nil
