@@ -768,6 +768,66 @@ and `TestMergeAbortRefusesSidecarRemovalThroughSymlinkEscape` (the real
 `cmdMergeAbort` entrypoint, proving the fix is actually wired in, not
 just correct in isolation).
 
+#### Ref-name path traversal, reachable over the network — found and fixed (2026-08-25)
+
+A different, more severe finding from the same audit pass: ref/branch
+names were never validated the way `FileChange.Path` is (see the
+first entry in this section). `refPath` (`cmd/9vcs/repo.go`) does a
+plain `filepath.Join(r.dir, "refs", name)`, and nothing upstream of it
+— `refHash`, `casWriteRef`/`writeRefFileLocked`, `branch`/`checkout
+-b` (local CLI args), or `refAdapter` (the concrete
+`vcsfs.RefReader`/`RefWriter` a repo hands to `vcsfs.FS`) — ever
+checked `name` for a `".."` segment.
+
+The serious part is the network reach: `vcsfs` itself has *no* path
+logic for refs at all — `dirFile.Walk`/`Create` for `kindRefs` pass
+`name` straight through to `RefReader.RefHash`/`RefWriter.SetRefHash`.
+And the `9p` server library performs no validation of its own on a
+`Twalk`/`Tcreate` name element either (confirmed against
+`server/dispatch.go`'s `tWalk`: each `Wname` element is passed
+straight to `File.Walk`, no rejection of `".."` or embedded `/`). A
+well-behaved client (`client.Client`, what `sync.go`/`reconcile.go`
+use) splits a path into multiple small `Twalk` elements before
+sending, and those get stopped early here — after resolving `refs`,
+the *next* element is looked up as a ref name in its own right by
+`kindRefs`'s `Walk`, not walked further as a subdirectory, so a
+multi-element `../../../tmp/evil` doesn't reach far. But nothing
+requires a client to split at all: the wire format's `Wname string`
+field can contain embedded `/` and `..` in a single element, and nothing
+server-side rejects that. A peer with only `PermWrite` — not local
+filesystem access — could send one such name and get an arbitrary
+`Hash.String()`-shaped value written to any path the serving process
+can write to, entirely outside `.9vcs/refs`. Content is limited to a
+hex hash plus a newline (`writeRefFileLocked`'s exact format), not
+arbitrary bytes, so this is corruption/DoS rather than arbitrary code
+execution — still a real, unauthenticated-content write to a path of
+the attacker's choosing.
+
+Fixed with `validRefName` (`cmd/9vcs/repo.go`), the same shape as
+`patches.validPath` (reject empty, an absolute name, or any `".."`
+segment) for the same reason — but kept separate from it rather than
+exported and shared, since nested branch names are an intentional
+feature here (`writeRefFileLocked`'s own `MkdirAll`) in a way that
+doesn't map cleanly onto file-content paths. Wired into `refHash`
+alone: `casWriteRef` already calls `refHash` before ever writing, so
+one choke point covers every read and write, local and remote,
+without touching every caller.
+
+Verified: reproduced live against the pre-fix code first —
+`refAdapter{r}.SetRefHash` (the literal `vcsfs.RefWriter` a real
+`serve` hands to the network) with a name string built via
+`filepath.Rel` to land outside the repo wrote a real file there.
+Reverted, re-ran against the fix: refused with `invalid ref name`, no
+file appeared. Permanent regression coverage in
+`cmd/9vcs/refname_test.go`: `TestValidRefNameRejectsTraversal` /
+`TestValidRefNameAllowsOrdinaryAndNestedNames` (the predicate itself,
+including that legitimate nested names like `feature/foo` still work),
+`TestRefHashRejectsInvalidName`,
+`TestRefAdapterSetRefHashRejectsTraversalEscape` /
+`TestRefAdapterRefHashRejectsTraversalEscape` (the exact network-facing
+interface, both directions), and `TestSetLocalRefCASRejectsTraversalName`
+(the purely-local path).
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:
