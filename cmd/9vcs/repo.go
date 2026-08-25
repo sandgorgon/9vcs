@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -153,6 +154,42 @@ func (r *repo) headFile() string { return filepath.Join(r.dir, "HEAD") }
 
 func (r *repo) refPath(name string) string { return filepath.Join(r.dir, "refs", name) }
 
+// validRefName mirrors objstore/patches' FileChange.Path validation —
+// same shape, same reason: refPath joins name straight onto r.dir via
+// filepath.Join, and nested branch names are a real, intentional feature
+// (writeRefFileLocked's MkdirAll), so name can't just be rejected for
+// containing "/" — only a ".." segment (or an absolute/empty name) makes
+// it dangerous.
+//
+// This isn't just a local hygiene check: name reaches here from
+// vcsfs.RefWriter/RefReader (see refAdapter below), which a peer's 9P
+// Twalk/Tcreate drives directly — the 9p server library performs no
+// validation of its own on a wname/create-name element (confirmed
+// against server/dispatch.go's tWalk: each element is passed straight to
+// File.Walk with no rejection of ".." or embedded "/"), and vcsfs itself
+// has no path logic for refs at all, passing name straight through to
+// this package. A malicious peer with only PermWrite (not full local
+// access) could otherwise point an arbitrary filesystem path outside
+// .9vcs/refs — anywhere the serving process can write — at a ref value
+// of their choosing, using a single wname/create-name string containing
+// its own embedded "/../" sequences (not multiple small Twalk elements;
+// see PLAN.md's writeup for why the multi-element form doesn't reach as
+// far).
+func validRefName(name string) bool {
+	if name == "" || strings.HasPrefix(name, "/") {
+		return false
+	}
+	if path.Clean(name) != name {
+		return false
+	}
+	for _, seg := range strings.Split(name, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // currentBranch returns the branch name HEAD points to, or "" if HEAD is
 // detached (points directly at a patch hash instead of a branch name).
 func (r *repo) currentBranch() (string, error) {
@@ -199,6 +236,9 @@ func (r *repo) headHash() (patches.Hash, bool, error) {
 
 // refHash reads the head patch hash of branch name, if it has one yet.
 func (r *repo) refHash(name string) (patches.Hash, bool, error) {
+	if !validRefName(name) {
+		return patches.Hash{}, false, fmt.Errorf("invalid ref name %q", name)
+	}
 	data, err := os.ReadFile(r.refPath(name))
 	if errors.Is(err, os.ErrNotExist) {
 		return patches.Hash{}, false, nil
