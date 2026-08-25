@@ -7,6 +7,17 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.2] - 2026-08-25
+
+### Added
+
+- A release workflow (`.github/workflows/release.yml`) that, on each
+  `v*` tag push, cross-compiles `cmd/9vcs` for linux/amd64,
+  linux/arm64, darwin/arm64, and darwin/amd64, and publishes each as a
+  `.tar.gz` (binary + `LICENSE` + `README.md`) with a `.sha256`
+  checksum to the GitHub Release — so installing no longer requires a
+  Go toolchain. Documented in the README's new "Install" section.
+
 ## [0.1.1] - 2026-08-25
 
 Follow-ups from actually dogfooding v0.1.0 (a real two-person-plus
