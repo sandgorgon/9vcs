@@ -415,6 +415,9 @@ func (f *writeFile) Read(ctx context.Context, offset int64, p []byte) (int, erro
 }
 
 func (f *writeFile) Write(ctx context.Context, offset int64, p []byte) (int, error) {
+	if err := checkWriteSize(offset, p); err != nil {
+		return 0, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	end := offset + int64(len(p))
@@ -581,6 +584,9 @@ func (f *refFile) Write(ctx context.Context, offset int64, p []byte) (int, error
 	if f.perm < identity.PermWrite {
 		return 0, fmt.Errorf("vcsfs: refs/%s: permission denied", f.name)
 	}
+	if err := checkWriteSize(offset, p); err != nil {
+		return 0, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	end := offset + int64(len(p))
@@ -623,6 +629,42 @@ func (f *refFile) Close() error {
 	}
 	if err := f.fs.Refs.SetRefHash(f.name, oldHash, newHash); err != nil {
 		return fmt.Errorf("vcsfs: refs/%s: %w", f.name, err)
+	}
+	return nil
+}
+
+// maxObjectSize bounds how large a single object (a patch, blob, offer,
+// or ref payload) this server will attempt to buffer in memory for one
+// write — checked against the *claimed* offset+len(p) before ever
+// allocating, not against how much data was actually received.
+//
+// Without this, a single Twrite whose offset is enormous forces an
+// allocation of that size regardless of how little real data
+// accompanies it — proven live before this fix existed: a two-byte
+// write claiming a 400MB offset grew the server's heap by ~400MB, and
+// nothing bounds how much further that scales. This is reachable before
+// any content, hash, or signature is ever checked (that only happens at
+// Close), and by the lowest trust tier this server has — PermPropose,
+// via /offers — not just PermWrite.
+//
+// Generous relative to what any of these object types actually need
+// (patches/refs are small metadata; blobs are the only case that could
+// reasonably be sizable) — a loose bound against a malicious or buggy
+// offset claim, not a considered product policy on maximum file size.
+const maxObjectSize = 1 << 30 // 1 GiB
+
+// checkWriteSize rejects a write before its caller ever attempts to grow
+// a buffer to fit it: a negative offset (reachable when a peer sends an
+// unsigned 9P offset large enough to wrap into a negative int64, which
+// would otherwise panic on the later slice expression buf[offset:]) or
+// an offset+len(p) beyond maxObjectSize.
+func checkWriteSize(offset int64, p []byte) error {
+	if offset < 0 {
+		return fmt.Errorf("vcsfs: negative write offset %d", offset)
+	}
+	end := offset + int64(len(p))
+	if end > maxObjectSize {
+		return fmt.Errorf("vcsfs: write would grow this object to %d bytes, over the %d-byte limit", end, maxObjectSize)
 	}
 	return nil
 }

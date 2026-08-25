@@ -236,6 +236,51 @@ func TestPatchWritePathTraversalRejected(t *testing.T) {
 	}
 }
 
+// TestWriteRejectsOversizedOffset is the regression test for a real,
+// live-proven vulnerability (see PLAN.md's "Unbounded write-offset
+// allocation"): before checkWriteSize existed, a single tiny write
+// claiming an enormous offset forced the server to allocate a buffer of
+// that claimed size — proven live with a 2-byte write claiming a 400MB
+// offset growing the server's heap by ~400MB, scaling without limit.
+// Reachable before any content, hash, or signature is ever checked
+// (that only happens at Close), by the lowest trust tier this server
+// has (PermPropose, via /offers), not just PermWrite.
+func TestWriteRejectsOversizedOffset(t *testing.T) {
+	fs, _ := newTestFS(t)
+	c := dialWith(t, fs, identity.PermWrite)
+
+	p := &patches.Patch{Message: "irrelevant — rejected before content is ever read"}
+	f, err := c.Create("patches/"+p.Hash().String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// A tiny write, at an offset just past maxObjectSize — real data
+	// sent is a couple of bytes; what's under test is whether the
+	// server still tries to honor the claimed offset regardless.
+	if _, err := f.WriteAt([]byte("hi"), maxObjectSize+1); err == nil {
+		t.Error("expected a write past maxObjectSize to be rejected, got nil")
+	}
+}
+
+func TestWriteRejectsNegativeOffset(t *testing.T) {
+	fs, _ := newTestFS(t)
+	c := dialWith(t, fs, identity.PermWrite)
+
+	p := &patches.Patch{Message: "irrelevant"}
+	f, err := c.Create("patches/"+p.Hash().String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// A negative offset would otherwise reach the later buf[offset:]
+	// slice expression directly and panic — Go slicing with a negative
+	// index always panics, unconditionally. Reachable in practice when a
+	// peer sends an unsigned 9P offset large enough to wrap into a
+	// negative int64.
+	if _, err := f.WriteAt([]byte("hi"), -1); err == nil {
+		t.Error("expected a negative-offset write to be rejected, got nil")
+	}
+}
+
 func TestBlobWriteRoundTrip(t *testing.T) {
 	fs, _ := newTestFS(t)
 	c := dialWith(t, fs, identity.PermWrite)

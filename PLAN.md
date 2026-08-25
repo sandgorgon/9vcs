@@ -504,6 +504,47 @@ silently dropped — confirmed by `log` showing the same patch count
 before and after, with the identical command succeeding normally once
 the lock was released.
 
+#### Unbounded write-offset allocation — found and fixed (2026-08-25)
+
+**Found auditing `vcsfs.go`'s write path for other issues, proven live
+before being called real**: `writeFile.Write`/`refFile.Write` (backing
+`/patches`, `/blobs`, `/offers`, and `/refs`) grew their in-memory
+buffer to `offset + len(p)` with no upper bound — and that size is
+entirely *client-claimed*, not derived from how much data was actually
+sent. A single `Twrite` with a tiny payload but an enormous offset
+forces the server to attempt an allocation of that claimed size. Proven
+live: a 2-byte write claiming a 400MB offset grew the server's heap by
+~400MB; nothing bounds how much further that scales short of exhausting
+the machine's memory. Reachable before any content, hash, or signature
+is ever checked (that only happens at `Close`), and by the *lowest*
+trust tier this server has — `PermPropose`, via `/offers` — not only
+`PermWrite`.
+
+**A second failure mode found while reading the same code, not
+separately live-tested (backed instead by Go's own unambiguous slicing
+semantics)**: a large enough unsigned 9P offset wraps into a negative
+`int64` once decoded; the existing code would have reached
+`buf[offset:]` with a negative index, which Go slicing always panics
+on, unconditionally — a crash, not just a resource exhaustion.
+
+**Fix**: `checkWriteSize` (`vcsfs/vcsfs.go`), checked before either
+`Write` method touches its buffer at all — rejects a negative offset
+outright, and rejects `offset + len(p)` beyond `maxObjectSize` (1 GiB,
+chosen as generous relative to what any of these object types
+legitimately need — patches/refs are small metadata, blobs are the only
+case that could reasonably be sizable — a loose bound against a
+malicious or buggy offset claim, not a considered product policy on
+maximum file size).
+
+**Verified**: `TestWriteRejectsOversizedOffset`/
+`TestWriteRejectsNegativeOffset` (`vcsfs`) cover both rejections
+directly. Re-ran the exact original live proof against the fixed code
+with an offset actually over the cap (2GB, since the original 400MB
+proof — chosen to be safe to run, not to test the specific limit — is
+comfortably *under* the new 1GiB cap and remains correctly allowed):
+heap growth dropped from ~400MB to ~0MB, confirming the rejection
+happens before any allocation, not after a partial one.
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:
