@@ -209,3 +209,30 @@ func TestRenameCandidateSkipsExpensiveDiffForHugeFiles(t *testing.T) {
 		t.Error("expected the oversized pair to be rejected as a candidate, got a match")
 	}
 }
+
+// TestRenameCandidateExactMatchDetectedEvenWhenOversized is the
+// regression test for the gap the size bound above would otherwise
+// introduce: a huge file renamed with *zero* changes is cheap to detect
+// (a hash comparison, O(n)) and never needed the expensive diff at all
+// — it must still be found, even though the pair is well over
+// maxRenameDiffCells, which only ever needs to reject the *ambiguous*
+// case (large and not identical).
+func TestRenameCandidateExactMatchDetectedEvenWhenOversized(t *testing.T) {
+	big := make([]string, 6000)
+	for i := range big {
+		big[i] = fmt.Sprintf("line %d", i)
+	}
+	if int64(len(big))*int64(len(big)) <= maxRenameDiffCells {
+		t.Fatalf("test setup: %d*%d must exceed maxRenameDiffCells (%d)", len(big), len(big), maxRenameDiffCells)
+	}
+	oldSt := textPathState(t, big)
+	newFc := newAddChange(t, "new.txt", append([]string{}, big...)) // identical content, different path only
+
+	score, pair, ok := renameCandidate("old.txt", oldSt, "new.txt", newFc)
+	if !ok {
+		t.Fatal("expected an exact-match rename to be detected even though the pair is oversized")
+	}
+	if score != 1.0 || pair.modified {
+		t.Errorf("score=%v modified=%v, want 1.0/false for byte-identical content", score, pair.modified)
+	}
+}
