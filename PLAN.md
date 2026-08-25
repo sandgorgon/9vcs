@@ -781,12 +781,16 @@ used to say:
   as everywhere else in this design. `export` unions the closures of
   however many `<ref-or-hash>` args are given (`patches.Closure` is
   already variadic) and pulls in any `KindBlob` content those patches
-  reference; `import` verifies the signature, `Store`s every patch/blob
-  (content-addressed, so naturally idempotent, no separate hash-pinning
-  needed), and touches no ref — matching decision #8, nothing is
-  integrated until a human reviews with `diff`/`show` and runs `merge`
-  selectively. `apply` itself stayed out of scope, as originally
-  planned. Verified live end-to-end: a sender exports two patches to a
+  reference; `import` verifies the bundle's own signature, then each
+  patch's own `AuthorFingerprint`/`AuthorSignature` (all-or-nothing —
+  see `Bundle.Store`'s doc comment: a forged claim anywhere in the
+  bundle refuses the whole import before anything is persisted, a real
+  gap found and closed after the fact — see Open items), then `Store`s
+  every patch/blob (content-addressed, so naturally idempotent, no
+  separate hash-pinning needed), and touches no ref — matching decision
+  #8, nothing is integrated until a human reviews with `diff`/`show` and
+  runs `merge` selectively. `apply` itself stayed out of scope, as
+  originally planned. Verified live end-to-end: a sender exports two patches to a
   file, a completely separate repo/identity `show`s it (pure inspection,
   no storage touched), `import`s it (patches present locally, `log` on
   `main` still empty — no ref moved), then `diff`/`merge`s the imported
@@ -843,12 +847,16 @@ used to say:
   it protected a property nothing needed yet; a single `patchFormatVersion`
   tripwire byte was kept instead. Revisit real dispatch only once *both*
   a formal release exists *and* the encoding needs to change again after
-  it — not either alone. Not yet built on top of this: the import/reconcile
-  cross-check against the TLS-verified peer's own fingerprint (still
-  floated as deferred UX in decision #1's Author identity subsection —
-  distinct from and additional to the forged-signature refusal that *is*
-  built), and per-patch signing's use inside bundle import once bundles
-  themselves exist.
+  it — not either alone. `bundle.Bundle.Store` now also verifies each
+  patch's own `AuthorFingerprint`/`AuthorSignature` before persisting
+  anything (all-or-nothing — a forged claim anywhere in the bundle
+  refuses the whole import), independent of the bundle's own signer
+  signature checked by `Bundle.Verify` — this closed a real gap where
+  bundle import had been built without it. Still not built on top of
+  this: the import/reconcile cross-check against the TLS-verified peer's
+  own fingerprint (still floated as deferred UX in decision #1's Author
+  identity subsection — distinct from and additional to the
+  forged-signature refusal that *is* built everywhere else).
 - iOS build: checked from this Linux dev environment, and it cannot be
   done here — not a gap in this codebase (neither it nor
   `sandgorgon/9p` uses cgo, confirmed by grepping both for `import

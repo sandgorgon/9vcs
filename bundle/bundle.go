@@ -61,7 +61,21 @@ func (b *Bundle) Verify() bool {
 // the way in regardless, same as every other write path. Store does not
 // touch any ref: nothing is integrated until a human reviews the bundle
 // and selectively applies patches from it.
+//
+// Every patch's own AuthorFingerprint/AuthorSignature is verified before
+// anything is persisted — a separate question from the bundle's own
+// signature (Verify, checked by the caller before Store is ever
+// reached): the bundle signature only proves who sent this file, not
+// that each individual patch's authorship claim inside it is genuine.
+// Checked up front, before any write, so a bundle carrying even one
+// forged claim is refused wholesale rather than partially imported —
+// Store either fully succeeds or leaves nothing behind to review.
 func (b *Bundle) Store(store *patches.Store, blobs *patches.BlobStore) error {
+	for _, p := range b.Patches {
+		if !p.VerifyAuthorSignature() {
+			return fmt.Errorf("bundle: patch %s claims authorship by fingerprint %x but its signature doesn't verify — possible forgery", p.Hash(), p.AuthorFingerprint)
+		}
+	}
 	for _, p := range b.Patches {
 		if _, err := store.Put(p); err != nil {
 			return fmt.Errorf("bundle: storing patch: %w", err)

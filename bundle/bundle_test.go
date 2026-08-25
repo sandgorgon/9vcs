@@ -193,6 +193,63 @@ func TestVerifyDetectsWrongKey(t *testing.T) {
 	}
 }
 
+// TestStoreRejectsForgedPatchAuthorship: a bundle's own signature only
+// proves who sent the file, not that each patch inside it genuinely
+// authored what it claims — a patch with a fingerprint it doesn't hold
+// the private key for must be refused by Store, independent of the
+// bundle-level signature verifying just fine. All-or-nothing: no patch
+// from the bundle should end up persisted, not just the forged one
+// skipped.
+func TestStoreRejectsForgedPatchAuthorship(t *testing.T) {
+	store, blobs := newTestStore(t)
+
+	good, err := store.Put(&patches.Patch{Message: "honest patch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	victimPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, attackerPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := &patches.Patch{Dependencies: []patches.Hash{good}, Message: "forged patch"}
+	copy(forged.AuthorFingerprint[:], victimPub)
+	copy(forged.AuthorSignature[:], ed25519.Sign(attackerPriv, forged.SignablePayload()))
+	forgedHash, err := store.Put(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, bundlePriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _, err := Export(store, blobs, []patches.Hash{forgedHash}, "", bundlePriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decoded, err := Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !decoded.Verify() {
+		t.Fatal("the bundle-level signature should still verify — the forgery is inside one patch, not the bundle itself")
+	}
+
+	freshStore, freshBlobs := newTestStore(t)
+	if err := decoded.Store(freshStore, freshBlobs); err == nil {
+		t.Fatal("expected Store to refuse a bundle containing a forged patch authorship claim")
+	}
+	if freshStore.Has(good) || freshStore.Has(forgedHash) {
+		t.Error("Store should be all-or-nothing: nothing should be persisted when any one patch fails verification")
+	}
+}
+
 func TestDecodeRejectsBadMagic(t *testing.T) {
 	if _, err := Decode([]byte("not a bundle at all, just text")); err == nil {
 		t.Fatal("expected an error decoding non-bundle data, got nil")
