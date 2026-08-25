@@ -1,0 +1,9 @@
+# Compiled binary, if built in-place (see README.md's Build section).
+/9vcs
+
+# Go build/test artifacts.
+*.test
+*.out
+
+# A 9vcs repo accidentally initialized inside this repo during local testing.
+/.9vcs
