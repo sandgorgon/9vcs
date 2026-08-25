@@ -312,6 +312,72 @@ workspace's lower-layer bind can be any subtree, and multiple concurrent
 workspaces against one repo are just multiple private namespaces — no
 `git worktree`/sparse-checkout special case needed.
 
+#### Ignore patterns — concrete scope (2026-08-25, built)
+
+The gap that made this necessary: `changedFiles`' scan of the delta layer
+(`workingFiles`, `cmd/9vcs/repo.go`) walked every regular file under the
+repo root with zero filtering, so the very first `record` in a real
+working directory would sweep in editor swap files, `.DS_Store`, build
+output, `node_modules` — silently, since nothing about it fails loudly.
+
+**File and format.** `.9vcsignore`, at the repo root — deliberately
+*not* under `.9vcs/` alongside `authorized-peers`/`known-peers`/`config`:
+those are host-specific and never recorded, this one is meant to be
+recorded and shared with the team, same as `.gitignore`. One pattern per
+line; blank lines and `#`-comments ignored, matching every other flat
+text file in this codebase.
+
+**Pattern semantics, deliberately a subset of gitignore's, not the full
+spec**: a line with no `/` matches at any depth (`*.log` matches
+`nested/dir/debug.log`); a line containing a `/` (or starting with one)
+is anchored to the repo root; a trailing `/` restricts a match to a real
+ancestor directory rather than a same-named file. What's cut on purpose:
+no `!`-negation (order-dependent re-inclusion is a real source of
+gitignore footguns, not worth it for a first pass) and no `**` (git
+added it later for a reason — plain single-segment globs via stdlib
+`path.Match` cover the common cases named above without it). A malformed
+pattern is a load-time error (`loadIgnore` validates every pattern via a
+throwaway `path.Match` call before use), not a silently-never-matching
+one.
+
+**Where the check actually lives, and why there specifically**: not
+inside `workingFiles` itself, but in `changedFiles` (`workingtree.go`),
+gated on `!existed` (the path isn't in `base`, the materialized index
+being compared against). This is the one property the whole design
+hinges on and got a dedicated regression test for
+(`TestChangedFilesNeverDropsAlreadyTrackedFile`): an ignore pattern only
+ever suppresses a genuinely *new*, untracked file from being swept in —
+exactly like `.gitignore` never un-tracks a file git's index already
+knows about. Filtering inside `workingFiles` instead would have no way
+to distinguish "new" from "already tracked," and would make adding a
+pattern that happens to match an already-recorded file look like a
+silent deletion the next time anyone ran `diff`/`record`. Every caller of
+`changedFiles` — `record`, `diff`, and the dirty-tree check `checkout`/
+`merge`/`apply`/`reconcile`'s pull path all share — gets this for free.
+
+**A real bug found by CLI smoke testing, not the unit tests**: a bare
+anchored pattern with no trailing slash (e.g. `/build`) matched only the
+literal path `build`, never `build/out.bin` beneath it — so a file under
+an ignored directory still leaked through. Real gitignore's rule is that
+matching a directory always prunes its whole subtree regardless of
+whether the pattern happened to end in `/`; the trailing `/` only
+additionally *restricts* a match to landing on a directory rather than a
+same-named file, it doesn't gate the pruning behavior itself. Fixed by
+matching every pattern as a sliding window over path segments (anchored
+patterns fix the window at position 0, unanchored patterns slide it to
+any starting depth) and, when the window doesn't land on the path's
+final segment, treating that as a directory match that covers everything
+beneath it regardless of `dirOnly` — pinned by
+`TestIgnorePatternWithoutTrailingSlashStillCoversDirectoryContents`.
+
+Verified live with the real binary, not just `go test`: a repo with
+`*.log`, `node_modules/`, and `/build` in `.9vcsignore` correctly
+recorded only the tracked source and `.9vcsignore` itself, excluding a
+`.log` file, a `node_modules` subtree, and `build/`'s contents; a
+separate run confirmed a file tracked *before* a matching pattern
+existed survived `diff` unchanged (no false deletion) and still picked
+up a genuine edit afterward.
+
 ### 3. Synthesized in-memory filesystem (Plan 9 synthetic-file-server pattern)
 
 Content under `/patches/<hash>` is real, durable, on-disk storage (it's
@@ -1213,6 +1279,13 @@ used to say:
   pass — unlike bundle export/import and `apply`, which each surfaced a
   real bug during their live verification, this one confirmed the design
   as specced without needing a fix.
+- `.9vcsignore` support: built and verified live — see decision #2's
+  "Ignore patterns — concrete scope" for the full design, scope cuts
+  (no `!`-negation, no `**`), and the real directory-pruning bug CLI
+  smoke testing caught and fixed (a bare anchored pattern with no
+  trailing slash wasn't covering its own subtree). Closes the one gap
+  called out as a real blocker to starting daily use with a real working
+  tree, not just a nice-to-have.
 
 ## Open items to revisit
 

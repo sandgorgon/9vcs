@@ -145,6 +145,15 @@ func joinLines(lines []patches.Line, trailingNewline bool) string {
 // for every path that differs — added, removed, or edited, text or binary
 // — keyed by path.
 //
+// A path matching .9vcsignore is skipped entirely, but only when it isn't
+// already in base: an ignore pattern only ever suppresses a genuinely new,
+// untracked file from being swept in, exactly like .gitignore never
+// un-tracks a file git already knows about. That's why the check happens
+// here, against base, rather than as a filter inside workingFiles — that
+// function has no way to tell "new" from "already tracked" apart, and
+// getting this backwards would make ignoring a directory after something
+// inside it was already recorded silently look like a deletion.
+//
 // For a path whose base has unresolved forks, this is also where
 // conflict resolution actually happens: the working-tree content is
 // diffed against the fork's marker-stripped rendering (never the
@@ -157,6 +166,10 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 	if err != nil {
 		return nil, err
 	}
+	ignore, err := loadIgnore(r.root)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", ignoreFileName, err)
+	}
 	present := make(map[string]bool, len(paths))
 	for _, p := range paths {
 		present[p] = true
@@ -164,11 +177,14 @@ func changedFiles(r *repo, base patches.Index) (map[string]patches.FileChange, e
 
 	out := map[string]patches.FileChange{}
 	for _, p := range paths {
+		prior, existed := base[p]
+		if !existed && ignore.matches(p) {
+			continue
+		}
 		content, err := os.ReadFile(filepath.Join(r.root, filepath.FromSlash(p)))
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", p, err)
 		}
-		prior, existed := base[p]
 
 		if isBinary(content) {
 			hash, err := r.blobs.Put(content)
