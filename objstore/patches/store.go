@@ -1,5 +1,7 @@
 package patches
 
+import "fmt"
+
 // Store is a content-addressed store of patch objects under one directory
 // (repo-relative: .9vcs/patches). Objects are immutable and durable on
 // disk — no synthesis layer needed here, unlike /view (see PLAN.md §3).
@@ -18,7 +20,20 @@ func Open(dir string) (*Store, error) {
 
 // Put encodes and hashes p, writing it to the store if not already present.
 // Content addressing makes this naturally idempotent.
+//
+// Validates every change's Path before anything is written — a second,
+// independent check alongside Decode's (see validPath's doc comment):
+// Decode guards every patch received from outside this process, this
+// guards every patch that's ever actually persisted regardless of how
+// the *Patch was built, so there's no route to a stored patch with an
+// unsafe path even from a hypothetical future local code path that
+// constructs one without going through Decode.
 func (s *Store) Put(p *Patch) (Hash, error) {
+	for _, fc := range p.Changes {
+		if !validPath(fc.Path) {
+			return Hash{}, fmt.Errorf("patches: unsafe path %q (escapes the repo root or isn't in canonical form)", fc.Path)
+		}
+	}
 	p.Normalize()
 	return s.raw.put(p.Encode())
 }

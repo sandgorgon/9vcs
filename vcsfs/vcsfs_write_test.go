@@ -201,6 +201,41 @@ func TestPatchWriteSignedAuthorshipAccepted(t *testing.T) {
 	}
 }
 
+// TestPatchWritePathTraversalRejected is the vcsfs-level regression test
+// for a real, live-proven vulnerability (see PLAN.md's "Path traversal
+// via FileChange.Path"): a patch whose FileChange.Path escapes the repo
+// root via ".." reached this exact write path (a served peer pushing a
+// patch — the real route a malicious or buggy import/reconcile source
+// would use) and, before objstore/patches.Decode validated it, would
+// have been accepted and, once later applied, written a file completely
+// outside the recipient's repo. Refused here, at the same severity as a
+// hash mismatch or a forged authorship claim, and — like those — never
+// stored under any hash.
+func TestPatchWritePathTraversalRejected(t *testing.T) {
+	fs, _ := newTestFS(t)
+	c := dialWith(t, fs, identity.PermWrite)
+
+	p := &patches.Patch{Message: "innocuous-looking commit message", Changes: []patches.FileChange{
+		{Path: "../../../../outside-the-repo.txt", Kind: patches.KindText, TrailingNewline: true,
+			Ops: []patches.LineOp{{Kind: patches.OpInsert, ID: "a", Content: "pwned"}}},
+	}}
+	realHash := p.Hash()
+
+	f, err := c.Create("patches/"+realHash.String(), 0o644, p9.OWRITE)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write(p.Encode()); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := f.Close(); err == nil {
+		t.Fatal("expected Close to reject a path-traversal patch, got nil")
+	}
+	if fs.Store.Has(realHash) {
+		t.Error("a patch with a path-traversal Path must not be stored, under any hash")
+	}
+}
+
 func TestBlobWriteRoundTrip(t *testing.T) {
 	fs, _ := newTestFS(t)
 	c := dialWith(t, fs, identity.PermWrite)
