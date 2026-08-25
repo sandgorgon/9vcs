@@ -11,10 +11,23 @@ import (
 
 func cmdMerge(args []string) error {
 	fs := flag.NewFlagSet("merge", flag.ExitOnError)
+	abort := fs.Bool("abort", false, "abandon the merge in progress (from merge or apply) and restore the working tree to head")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
+
+	if *abort {
+		if len(rest) != 0 {
+			return fmt.Errorf("merge -abort: no other arguments expected")
+		}
+		r, err := findRepo()
+		if err != nil {
+			return err
+		}
+		return cmdMergeAbort(r)
+	}
+
 	if len(rest) != 1 {
 		return fmt.Errorf("merge: expected exactly one branch name or patch hash")
 	}
@@ -27,7 +40,7 @@ func cmdMerge(args []string) error {
 	if heads, err := r.mergeHeads(); err != nil {
 		return err
 	} else if len(heads) > 0 {
-		return fmt.Errorf("merge: a merge is already in progress; resolve conflicts and run record, or remove %s to abort", r.mergeHeadFile())
+		return fmt.Errorf("merge: a merge is already in progress; resolve conflicts and run record, or `9vcs merge -abort` to abandon it")
 	}
 
 	branch, err := r.currentBranch()
@@ -153,5 +166,69 @@ func cmdMerge(args []string) error {
 			fmt.Printf("  CONFLICT: %s\n", c.Path)
 		}
 	}
+	return nil
+}
+
+// cmdMergeAbort abandons whatever merge is in progress — whether started
+// by `merge` or `apply`, both of which write the exact same MERGE_HEAD/
+// MERGE_SIDECARS state (see PLAN.md decision #8's "apply — concrete
+// scope": apply's N-way MERGE_HEAD generalization is what makes one
+// abort implementation correct for both, with no special-casing of which
+// command started it). Recomputes exactly what was written to the
+// working tree (the same deterministic computeMerge(head, mergeHeads...)
+// call merge/apply/status all already make — a pure function of its
+// roots, so this reproduces it byte-for-byte without needing to have
+// remembered it), then reverses it: writeWorkingTree(r, merged, headIdx)
+// overwrites every path back to head's content and removes anything the
+// incoming side added, exactly mirroring how a plain checkout/pullRef
+// replaces one materialized state with another.
+//
+// Like `git merge --abort`, this discards any hand-editing done to
+// resolve conflicts since the merge started — there's no partial-save;
+// it's a full return to head, not a selective undo.
+func cmdMergeAbort(r *repo) error {
+	heads, err := r.mergeHeads()
+	if err != nil {
+		return fmt.Errorf("merge -abort: %w", err)
+	}
+	if len(heads) == 0 {
+		return fmt.Errorf("merge -abort: no merge in progress")
+	}
+
+	head, _, err := r.headHash()
+	if err != nil {
+		return fmt.Errorf("reading head: %w", err)
+	}
+	headIdx, err := r.materialize(head)
+	if err != nil {
+		return fmt.Errorf("replaying history: %w", err)
+	}
+	merged, _, err := computeMerge(r, append([]patches.Hash{head}, heads...)...)
+	if err != nil {
+		return fmt.Errorf("merge -abort: %w", err)
+	}
+	if err := writeWorkingTree(r, merged, headIdx); err != nil {
+		return fmt.Errorf("merge -abort: restoring working tree: %w", err)
+	}
+
+	sidecars, err := r.mergeSidecars()
+	if err != nil {
+		return fmt.Errorf("merge -abort: %w", err)
+	}
+	for _, s := range sidecars {
+		full := filepath.Join(r.root, filepath.FromSlash(s))
+		if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("merge -abort: removing %s: %w", s, err)
+		}
+	}
+
+	if err := r.clearMergeHeads(); err != nil {
+		return fmt.Errorf("merge -abort: %w", err)
+	}
+	if err := r.clearMergeSidecars(); err != nil {
+		return fmt.Errorf("merge -abort: %w", err)
+	}
+
+	fmt.Printf("merge aborted; working tree restored to %s\n", head.String()[:12])
 	return nil
 }

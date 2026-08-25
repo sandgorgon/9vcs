@@ -35,7 +35,7 @@ func cmdApply(args []string) error {
 	if heads, err := r.mergeHeads(); err != nil {
 		return err
 	} else if len(heads) > 0 {
-		return fmt.Errorf("apply: a merge is already in progress; resolve conflicts and run record, or remove %s to abort", r.mergeHeadFile())
+		return fmt.Errorf("apply: a merge is already in progress; resolve conflicts and run record, or `9vcs merge -abort` to abandon it")
 	}
 
 	branch, err := r.currentBranch()

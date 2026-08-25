@@ -68,11 +68,12 @@ commands:
   init                        initialize a repository in the current directory
   record -m MSG               record a patch from the current working tree changes
   log [<ref>]                 show recorded patches, most recent first
-  status                       one line per changed path (A/M/D/U) — what's dirty, not the diff itself
+  status                       one line per changed path (A/M/D/U/R/R+) — what's dirty, not the diff itself
   branch [<name> [<start>]]   list branches, or create one
   checkout [-b] <name-or-hash> switch the working tree to a branch or patch
   diff [<ref>] [<ref>]        show uncommitted changes, or the difference between two points
   merge <name-or-hash>        merge a branch or patch into the current branch
+  merge -abort                 abandon a merge or apply in progress, restoring the working tree to head
   identity show               print this install's fingerprint, for out-of-band exchange
   config [-global] <key> [<value>]
                                get or set user.name / user.email, used as the patch Author;
