@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags "-s -w" -o build/9vcs ./cmd/9vcs
+
+      - name: Package
+        run: |
+          dist="9vcs_${GITHUB_REF_NAME}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          mkdir -p "$dist"
+          cp build/9vcs LICENSE README.md "$dist/"
+          tar czf "$dist.tar.gz" "$dist"
+          sha256sum "$dist.tar.gz" > "$dist.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 9vcs_${{ github.ref_name }}_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/*.tar.gz.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
