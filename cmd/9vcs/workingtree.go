@@ -60,7 +60,19 @@ func formatAuthor(name, email string) string {
 // that's opportunistic, not required, would be a real regression. An
 // unsigned patch is a fully legitimate state — see
 // Patch.VerifyAuthorSignature.
+//
+// Normalizes patch first — this is load-bearing, not just tidiness:
+// Store.Put also calls Normalize (sorting Dependencies/Changes) right
+// before Encode, so signing an un-normalized patch computes a signature
+// over different bytes than what's actually stored and later verified,
+// the moment there's more than one Dependency or Change to reorder — a
+// two-way merge's Changes usually didn't expose this (often zero or one
+// entry), but a real N-way apply's multi-dependency merge patch did,
+// caught by live testing (Fingerprint showed "INVALID SIGNATURE" on a
+// clean three-way apply). Normalize is idempotent, so Store.Put's own
+// call afterward is a harmless no-op.
 func signPatch(patch *patches.Patch) {
+	patch.Normalize()
 	id, err := identity.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: recording unsigned (identity unavailable): %v\n", err)

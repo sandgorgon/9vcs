@@ -24,9 +24,9 @@ func cmdMerge(args []string) error {
 		return err
 	}
 
-	if _, mid, err := r.mergeHead(); err != nil {
+	if heads, err := r.mergeHeads(); err != nil {
 		return err
-	} else if mid {
+	} else if len(heads) > 0 {
 		return fmt.Errorf("merge: a merge is already in progress; resolve conflicts and run record, or remove %s to abort", r.mergeHeadFile())
 	}
 
@@ -117,7 +117,7 @@ func cmdMerge(args []string) error {
 		if err != nil {
 			return fmt.Errorf("reading blob for %s: %w", c.Path, err)
 		}
-		sidecar := binaryConflictSidecar(c.Path)
+		sidecar := binaryConflictSidecar(c.Path, theirs)
 		full := filepath.Join(r.root, filepath.FromSlash(sidecar))
 		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 			return err
@@ -131,7 +131,7 @@ func cmdMerge(args []string) error {
 	if err := writeWorkingTree(r, oursIdx, merged); err != nil {
 		return fmt.Errorf("writing working tree: %w", err)
 	}
-	if err := r.setMergeHead(theirs); err != nil {
+	if err := r.setMergeHeads([]patches.Hash{theirs}); err != nil {
 		return fmt.Errorf("recording merge state: %w", err)
 	}
 	if err := r.setMergeSidecars(sidecars); err != nil {
@@ -146,7 +146,7 @@ func cmdMerge(args []string) error {
 	for _, c := range conflicts {
 		switch c.Kind {
 		case "binary":
-			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", c.Path, binaryConflictSidecar(c.Path))
+			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", c.Path, binaryConflictSidecar(c.Path, theirs))
 		case "modify/delete":
 			fmt.Printf("  CONFLICT (modify/delete): %s — deleted by %s, modified by the other side; kept the modified version\n", c.Path, c.DeletedBy)
 		default:

@@ -146,6 +146,43 @@ func TestVerifyAuthorSignatureWrongKey(t *testing.T) {
 	}
 }
 
+// TestSigningMustHappenAfterNormalize is a regression for a real bug
+// found via live testing of apply (a merge patch with several
+// Dependencies): cmd/9vcs's record.go signed a patch before Store.Put's
+// internal Normalize() reordered Dependencies/Changes, so the signed
+// bytes and the later-verified bytes diverged the moment there was more
+// than one Dependency to reorder — a two-way merge's single "theirs"
+// dependency rarely exposed this, but a real N-way apply always
+// involves several. This pins the property any future signing call
+// site needs: sign only after Normalize, never before.
+func TestSigningMustHappenAfterNormalize(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsorted := []Hash{{0xFF}, {0x01}} // deliberately not in Normalize's sorted order
+
+	// The bug: sign before Normalize, exactly what record.go used to do.
+	broken := &Patch{Dependencies: append([]Hash{}, unsorted...), Message: "m"}
+	copy(broken.AuthorFingerprint[:], pub)
+	copy(broken.AuthorSignature[:], ed25519.Sign(priv, broken.SignablePayload()))
+	broken.Normalize() // Store.Put does this before Encode/Hash
+	if broken.VerifyAuthorSignature() {
+		t.Fatal("signing before Normalize should break verification once Normalize reorders Dependencies — this test documents the bug shape, not the fix")
+	}
+
+	// The fix: Normalize before signing (idempotent, so Store.Put's own
+	// later Normalize call is a harmless no-op).
+	fixed := &Patch{Dependencies: append([]Hash{}, unsorted...), Message: "m"}
+	fixed.Normalize()
+	copy(fixed.AuthorFingerprint[:], pub)
+	copy(fixed.AuthorSignature[:], ed25519.Sign(priv, fixed.SignablePayload()))
+	fixed.Normalize()
+	if !fixed.VerifyAuthorSignature() {
+		t.Fatal("signing after Normalize should verify even after a second, idempotent Normalize call")
+	}
+}
+
 func TestDecodeRejectsUnrecognizedFormatByte(t *testing.T) {
 	if _, err := Decode([]byte{0}); err == nil {
 		t.Fatal("expected an error decoding format byte 0 (never issued), got nil")

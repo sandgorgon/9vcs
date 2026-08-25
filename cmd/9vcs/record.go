@@ -37,10 +37,11 @@ func cmdRecord(args []string) error {
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
-	mergeHead, midMerge, err := r.mergeHead()
+	mergeHeads, err := r.mergeHeads()
 	if err != nil {
 		return fmt.Errorf("reading merge state: %w", err)
 	}
+	midMerge := len(mergeHeads) > 0
 	if midMerge {
 		// Remove merge's comparison sidecars before diffing the working
 		// tree — they're tooling, not content, and must never end up
@@ -65,7 +66,7 @@ func cmdRecord(args []string) error {
 		// know to prefer a modified path over one that lost a
 		// modify/delete race, and would disagree with what's actually on
 		// disk for that path, corrupting line identity on the next edit.
-		base, mergeConflicts, err = computeMerge(r, head, mergeHead)
+		base, mergeConflicts, err = computeMerge(r, append([]patches.Hash{head}, mergeHeads...)...)
 	} else {
 		base, err = r.materialize(head)
 	}
@@ -133,8 +134,8 @@ func cmdRecord(args []string) error {
 	if !head.IsZero() {
 		deps = append(deps, head)
 	}
-	if midMerge && !mergeHead.IsZero() {
-		deps = append(deps, mergeHead)
+	if midMerge {
+		deps = append(deps, mergeHeads...)
 	}
 
 	authorStr, err := author(r)
@@ -155,7 +156,7 @@ func cmdRecord(args []string) error {
 		return fmt.Errorf("updating ref: %w", err)
 	}
 	if midMerge {
-		if err := r.clearMergeHead(); err != nil {
+		if err := r.clearMergeHeads(); err != nil {
 			return fmt.Errorf("clearing merge state: %w", err)
 		}
 		if err := r.clearMergeSidecars(); err != nil {

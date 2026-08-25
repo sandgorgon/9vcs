@@ -87,6 +87,51 @@ func TestSetRefHashCASConflict(t *testing.T) {
 	}
 }
 
+func TestMergeHeadsRoundTrip(t *testing.T) {
+	r := newTestRepo(t)
+
+	if heads, err := r.mergeHeads(); err != nil || len(heads) != 0 {
+		t.Fatalf("mergeHeads() on a fresh repo = %v, %v, want empty, nil", heads, err)
+	}
+
+	a, err := r.store.Put(&patches.Patch{Message: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := r.store.Put(&patches.Patch{Message: "b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := r.store.Put(&patches.Patch{Message: "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []patches.Hash{a, b, c}
+	if err := r.setMergeHeads(want); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.mergeHeads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("mergeHeads() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("mergeHeads()[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+
+	if err := r.clearMergeHeads(); err != nil {
+		t.Fatal(err)
+	}
+	if heads, err := r.mergeHeads(); err != nil || len(heads) != 0 {
+		t.Fatalf("mergeHeads() after clearMergeHeads = %v, %v, want empty, nil", heads, err)
+	}
+}
+
 func TestSetRefHashCASRejectsUnknownPatch(t *testing.T) {
 	r := newTestRepo(t)
 	var unknown patches.Hash

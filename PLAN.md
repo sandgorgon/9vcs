@@ -539,16 +539,85 @@ way code review already requires judgment. Note the bundle signature
 patch's existing `Author` field (who wrote the change) — a bundle can
 carry patches authored by people other than its signer.
 
-**`apply` is out of this scope, flagged as a dependency, not solved
-here**: `merge.go`'s `resolveRef` already accepts a bare patch hash as
-its merge target, so applying one selected patch may mostly fall out of
-the existing two-way merge machinery (`mergeutil.go`) as-is. What's
-genuinely open: chaining multiple selected patches in one `apply` call —
-`cmdMerge` currently refuses a second `merge` while one is already
-in-progress (`MERGE_HEAD` set), so applying N patches back-to-back needs
-either an auto-record between each clean (non-conflicting) merge, or a
-true N-way merge patch (`Dependencies = [ours, p1, ..., pN]`) computed in
-one call — undecided, revisit when `apply` itself is scoped.
+#### `apply` — concrete scope (2026-08-24, not yet built)
+
+The open question this used to leave undecided — auto-record between
+each pairwise merge, or a true N-way merge patch — is resolved by
+actually reading the graph/merge code rather than guessing: **a true
+N-way merge patch wins outright**, not just as the nicer alternative. The
+core conflict machinery (`objstore/patches/linearize.go`'s `Linearize`/
+`Resolve`) is *already* N-way, with no changes needed — a fork is just
+"a node with more than one alive outgoing edge," and every place that
+walks `Fork.Alternatives` already loops over however many there are, not
+an assumed two (verified by reading `walkFrom`'s `candidates`-length
+switch and `Resolve`'s `for _, alt := range f.Alternatives`). Only the
+CLI-facing layer above that graph — `cmd/9vcs/mergeutil.go`'s
+`computeMerge`, and `merge.go`/`repo.go`'s single-hash `MERGE_HEAD` — is
+hardcoded to exactly two sides. So the real work is generalizing that
+layer, not inventing N-way conflict detection from scratch, and the
+"auto-record between clean merges" alternative stops being necessary at
+all: with one real N-way merge, there's exactly one merge-in-progress
+state to resolve and finalize, the same one-`record`-call UX `merge`
+already has today — not N sequential ones.
+
+**What has to change, concretely:**
+
+- **`repo.go`'s `MERGE_HEAD` becomes a list, not a single hash** —
+  `mergeHead()`/`setMergeHead(h)` become `mergeHeads()`/
+  `setMergeHeads(hs)`, one hash per line. This is git's own actual
+  `MERGE_HEAD` format (git has supported multiple lines for octopus
+  merges since it added the feature), not a novel scheme. `merge.go`'s
+  existing two-way call sites become one-element-list calls — no
+  behavior change there.
+- **`mergeutil.go`'s `computeMerge(r, ours, theirs)` generalizes to
+  `computeMerge(r, roots ...patches.Hash)`.** The union/text-conflict
+  part needs no change (`r.materialize(roots...)` is already variadic,
+  and `Linearize`'s fork detection is already N-way, as above). Two
+  loops are genuinely 2-way today and need rewriting as N-way:
+  - **Binary conflicts**: today compares `oursIdx[p]` against
+    `theirsIdx[p]` pairwise. Generalizes to: for each path, materialize
+    each of the N roots individually, and conflict if more than one
+    distinct blob hash appears among them (keeping the first — `ours` —
+    by the same policy as today, still simple majority-free "pick a
+    side, flag it" resolution).
+  - **Modify/delete races**: today's `UniqueChanges(store, theirs,
+    oursClosure)` asks "what did theirs uniquely do relative to ours."
+    Generalizes to: for each root `i`, `UniqueChanges(store, roots[i],
+    patches.Closure(store, otherRoots...))` — `patches.Closure` is
+    already variadic, so "the union of everyone else's closure" is a
+    direct call, not new machinery.
+- **Binary-conflict sidecars** (`merge.go`'s `binaryConflictSidecar`)
+  currently always writes exactly one `path.theirs` file. With N sides,
+  a binary conflict can have more than one losing side to show for
+  comparison — rename to include which side, e.g.
+  `path.<short-hash>` per differing side, rather than a fixed
+  `.theirs` suffix. `record.go`'s sidecar cleanup already iterates a
+  list of paths from `mergeSidecars()`, so it needs no structural
+  change, just more entries in that list.
+
+**New `cmd/9vcs/apply.go`: `9vcs apply <patch-hash-or-ref> [<patch-hash-or-ref>...]`.**
+Reuses `repo.resolveRef` for each target exactly like `merge` does (no
+reason to forbid branch names, even though the expected case is patch
+hashes pulled from a `bundle show`). Filters out any target already in
+`ours`'s closure (reported as already-applied, not an error); if nothing
+remains, "already up to date." Otherwise computes the merge across
+`ours` plus whatever targets remain via the generalized `computeMerge`,
+writes the working tree, calls `setMergeHeads` with the remaining
+targets, and reports exactly like `cmdMerge` does today — "merged
+cleanly; run `9vcs record` to finish" or the conflict list. `record.go`'s
+existing finalize path (already reading `mergeHead`/sidecars generically
+enough) needs updating to the list-based `mergeHeads()` API and to build
+`Dependencies` from `head` plus every merge head, not just one.
+
+**Deliberately not touched in this pass**: `cmd/9vcs merge`'s own CLI
+surface stays single-target. Once `computeMerge`/`mergeHeads` are
+generalized, giving `merge` the same multi-arg (octopus-merge) capability
+`apply` gets is very close to free — but that's a distinct CLI decision
+(does a user-facing octopus `merge` pull its weight?) from what `apply`
+actually needs, so it's left for later rather than bundled in here.
+`apply` needs no dependency on the `bundle` package at all — it operates
+purely on patch hashes already present in the local store, however they
+got there (`bundle import`, `reconcile`, or a plain `record`).
 
 ## Vocabulary (deliberately not GitHub-shaped)
 
@@ -818,19 +887,66 @@ used to say:
   robustness gap (`import`/`reconcile` already fed untrusted peer bytes
   through the same `patches.Decode`, and the fix now applies there too),
   not just a bundle-specific one.
+- `apply`: built and verified live, exactly as scoped under decision #8
+  — a true N-way merge patch, not chained pairwise merges. Confirmed by
+  reading the graph code (not assumed) that `Linearize`/`Resolve` needed
+  zero changes: a fork is already however-many-alternatives, not a
+  hardcoded two. What did need generalizing: `repo.go`'s `MERGE_HEAD`
+  is now a list (`mergeHeads`/`setMergeHeads`/`clearMergeHeads`, one hash
+  per line — git's own actual octopus-merge format), `mergeutil.go`'s
+  `computeMerge(r, ours, theirs)` is now `computeMerge(r, roots
+  ...patches.Hash)` (binary-conflict and modify/delete detection
+  rewritten to loop over N roots, reusing `patches.Closure`'s existing
+  variadic union — text-conflict detection needed no change at all), and
+  `binaryConflictSidecar` now names its sidecar by short hash instead of
+  a fixed `.theirs` suffix, so an N-way binary conflict can show more
+  than one losing side. `merge.go`'s existing two-way call sites became
+  one-element-list calls with no behavior change (all of `merge`'s
+  existing tests still pass unmodified). New `cmd/9vcs/apply.go`:
+  `9vcs apply <patch-hash-or-ref>...` resolves and dedupes targets
+  (already-applied ones are skipped, not errors), fast-forwards the
+  single-target degenerate case, otherwise computes one real N-way merge
+  and hands off to the same `record`-to-finish flow `merge` already has
+  — no separate finalize path needed.
+
+  Verified live end-to-end, not just unit tests: three independent
+  branches applied together in one call, cleanly; the already-applied
+  case correctly skipped and reported; a fast-forward case; and a
+  genuine three-way *text* conflict — real content, not synthetic —
+  correctly rendered with all three alternatives (`Linearize`'s N-way-ness
+  holding up live, not just in isolation), resolved, and finalized.
+  Unit tests (`mergeutil_test.go`) cover three-way clean/text/binary/
+  modify-delete cases directly, including confirming a third,
+  uninvolved root doesn't mask or alter a modify/delete race between the
+  other two.
+
+  **A real bug found by that live testing, not caught by unit tests**:
+  `record.go` signed a patch *before* `Store.Put`'s internal `Normalize()`
+  reordered `Dependencies`/`Changes`, so the signed bytes and the
+  later-verified bytes diverged whenever there was more than one
+  dependency to reorder — invisible for an ordinary two-way merge (often
+  zero or one `Change`, and `Normalize` sorting a one-element
+  `Dependencies` slice is a no-op), but a merge patch from `apply` always
+  has several dependencies. Surfaced as `9vcs log` printing `Fingerprint:
+  ... (INVALID SIGNATURE)` on an otherwise-correct, cleanly-applied
+  merge. Fixed by having `signPatch` (`workingtree.go`) call
+  `patch.Normalize()` itself before signing — idempotent, so `Store.Put`'s
+  own later call is a harmless no-op — with a regression test
+  (`objstore/patches`' `TestSigningMustHappenAfterNormalize`) pinning
+  the property directly: sign only after `Normalize`, never before.
 
 ## Open items to revisit
 
-- Bundle export/import (decision #8: signed, offline patch exchange) is
-  now built — see Status. `apply` (selective, chainable integration of
-  specific patches from an imported bundle) is still not built and
-  remains genuinely open: `merge.go` already accepts a bare patch hash
-  as its target, so applying one selected patch likely falls out of the
-  existing two-way merge machinery as-is, but chaining several in one
-  `apply` call needs either an auto-record between each clean merge or a
-  true N-way merge patch — undecided, revisit when `apply` is scoped.
-  The optional live `/offers` variant (decision #8, `propose` permission
-  tier) is also still unbuilt.
+- Bundle export/import and `apply` (decision #8: signed, offline patch
+  exchange, plus true N-way selective integration) are both now built —
+  see Status. The previously-open question on `apply` (auto-record
+  between pairwise merges, or a true N-way merge patch) is resolved: a
+  true N-way merge patch, once it turned out the graph/conflict
+  machinery (`Linearize`/`Resolve`) was already N-way and only the
+  CLI-facing `computeMerge`/`MERGE_HEAD` layer needed generalizing from
+  two sides to N. The optional live `/offers` variant (decision #8,
+  `propose` permission tier) is still unbuilt — the last unbuilt piece
+  of decision #8.
 - `Patch.Author` end to end is now fully built: Tier 1 (configurable
   `user.name`/`user.email`, no wire format change) and
   `AuthorFingerprint`/`AuthorSignature` (real per-patch signing verified

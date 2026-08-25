@@ -202,30 +202,48 @@ func (r *repo) setRefHashCAS(name string, old, new patches.Hash) error {
 
 func (r *repo) mergeHeadFile() string { return filepath.Join(r.dir, "MERGE_HEAD") }
 
-// mergeHead reads the in-progress merge's other side, if any. Its presence
-// is what tells record to make the next patch depend on both branch tips
-// instead of just HEAD, and to finalize the merge rather than requiring
-// changes.
-func (r *repo) mergeHead() (patches.Hash, bool, error) {
+// mergeHeads reads the in-progress merge's other side(s), if any — one
+// hash per line, the same MERGE_HEAD format git itself uses (which
+// supports multiple lines for octopus merges, not a 9vcs invention).
+// Their presence is what tells record to make the next patch depend on
+// HEAD plus every merge head instead of just HEAD, and to finalize the
+// merge rather than requiring changes. A nil/empty result means no merge
+// is in progress.
+func (r *repo) mergeHeads() ([]patches.Hash, error) {
 	data, err := os.ReadFile(r.mergeHeadFile())
 	if errors.Is(err, os.ErrNotExist) {
-		return patches.Hash{}, false, nil
+		return nil, nil
 	}
 	if err != nil {
-		return patches.Hash{}, false, err
+		return nil, err
 	}
-	h, err := patches.HashFromHex(strings.TrimSpace(string(data)))
-	if err != nil {
-		return patches.Hash{}, false, err
+	var heads []patches.Hash
+	for line := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		h, err := patches.HashFromHex(line)
+		if err != nil {
+			return nil, err
+		}
+		heads = append(heads, h)
 	}
-	return h, true, nil
+	return heads, nil
 }
 
-func (r *repo) setMergeHead(h patches.Hash) error {
-	return os.WriteFile(r.mergeHeadFile(), []byte(h.String()+"\n"), 0o644)
+// setMergeHeads writes heads, one per line, replacing whatever
+// MERGE_HEAD held before.
+func (r *repo) setMergeHeads(heads []patches.Hash) error {
+	var b strings.Builder
+	for _, h := range heads {
+		b.WriteString(h.String())
+		b.WriteString("\n")
+	}
+	return os.WriteFile(r.mergeHeadFile(), []byte(b.String()), 0o644)
 }
 
-func (r *repo) clearMergeHead() error {
+func (r *repo) clearMergeHeads() error {
 	err := os.Remove(r.mergeHeadFile())
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -235,12 +253,17 @@ func (r *repo) clearMergeHead() error {
 
 func (r *repo) mergeSidecarsFile() string { return filepath.Join(r.dir, "MERGE_SIDECARS") }
 
-// binaryConflictSidecar is the path merge writes theirs' content to,
-// alongside a binary conflict — e.g. "logo.png.theirs" next to
-// "logo.png", which keeps ours. It's a comparison aid, not tracked
-// content: record deletes it once the merge is finalized (see
-// mergeSidecars/setMergeSidecars).
-func binaryConflictSidecar(path string) string { return path + ".theirs" }
+// binaryConflictSidecar is the path merge/apply writes a losing side's
+// content to, alongside a binary conflict — e.g. "logo.png.a1b2c3d4e5f6"
+// next to "logo.png", which keeps roots[0]'s ("ours") content. Named by
+// short hash rather than a fixed ".theirs" suffix so apply's N-way case
+// can write one sidecar per differing side without a naming collision —
+// merge's own two-way case just calls this once, with its one "theirs"
+// hash. It's a comparison aid, not tracked content: record deletes it
+// once the merge is finalized (see mergeSidecars/setMergeSidecars).
+func binaryConflictSidecar(path string, side patches.Hash) string {
+	return path + "." + side.String()[:12]
+}
 
 // setMergeSidecars records every sidecar path merge wrote, so record knows
 // what to clean up once it finalizes — these are merge tooling, not

@@ -41,6 +41,8 @@ func main() {
 		err = cmdReconcile(os.Args[2:])
 	case "bundle":
 		err = cmdBundle(os.Args[2:])
+	case "apply":
+		err = cmdApply(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -82,6 +84,8 @@ commands:
   bundle show <file>           inspect a bundle's signer, message, and patches without storing anything
   bundle import <file>         verify a bundle's signature and add its patches/blobs locally;
                                touches no ref — review with diff/merge before it's integrated
+  apply <patch-hash-or-ref>... integrate one or more specific patches into the current branch
+                               in a single merge (merge's N-way sibling) — run record to finish
 
 -peer-fingerprint pins the expected peer explicitly for one call; omit it to use
 this install's known-peers store instead (~/.config/9vcs/known-peers on Linux),
