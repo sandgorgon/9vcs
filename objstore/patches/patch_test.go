@@ -403,3 +403,39 @@ func containsAll(hay []string, needles ...string) bool {
 	}
 	return true
 }
+
+func TestHashFromHexRoundTrip(t *testing.T) {
+	want := Hash{1, 2, 3, 4, 5}
+	got, err := HashFromHex(want.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+}
+
+// TestHashFromHexRejectsWrongLength is the regression test for a real
+// gap: hex.DecodeString only rejects malformed hex, not the wrong
+// length, so a valid-hex string shorter than 32 bytes previously
+// zero-padded into a real Hash with no error — including, for the
+// shortest inputs, the zero hash itself, the sentinel this codebase
+// uses everywhere to mean "no such ref"/"no dependency" (see
+// Hash.IsZero's callers). A too-long input silently truncated the same
+// way. Not shown to be exploitable on its own (Hash.String() always
+// re-encodes to a canonical 64-char string, so it isn't a path-traversal
+// vector the way FileChange.Path or ref names were), but it's the same
+// shape of "accepts more than it should" that both of those turned out
+// to be — rejected outright now instead of silently coerced.
+func TestHashFromHexRejectsWrongLength(t *testing.T) {
+	cases := []string{
+		"",                      // 0 bytes
+		"00",                    // 1 byte — decodes to the zero-hash sentinel
+		Hash{1}.String() + "ff", // 33 bytes — would otherwise silently truncate
+	}
+	for _, s := range cases {
+		if h, err := HashFromHex(s); err == nil {
+			t.Errorf("HashFromHex(%q) = %s, nil, want an error", s, h)
+		}
+	}
+}

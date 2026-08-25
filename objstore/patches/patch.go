@@ -31,6 +31,21 @@ func HashFromHex(s string) (Hash, error) {
 	if err != nil {
 		return h, err
 	}
+	// hex.DecodeString only rejects malformed hex, not the wrong length —
+	// without this check, any valid-hex string shorter than 32 bytes
+	// (e.g. "00") silently zero-pads into a real Hash value with no
+	// error, including — for the shortest inputs — the zero hash itself,
+	// the sentinel this codebase uses everywhere to mean "no such ref"/
+	// "no dependency" (see Hash.IsZero's callers). A too-long input
+	// would silently truncate the same way. Neither is a path-traversal
+	// risk on its own (Hash.String() always re-encodes to a canonical
+	// 64-char string), but it's exactly the kind of "accepts more than
+	// it should" gap this codebase has twice already turned out to be
+	// exploitable elsewhere (FileChange.Path, ref names) — reject it
+	// outright rather than silently coercing.
+	if len(b) != len(h) {
+		return Hash{}, fmt.Errorf("patches: %q is not a %d-byte hash (got %d bytes)", s, len(h), len(b))
+	}
 	copy(h[:], b)
 	return h, nil
 }
