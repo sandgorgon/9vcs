@@ -828,6 +828,34 @@ including that legitimate nested names like `feature/foo` still work),
 interface, both directions), and `TestSetLocalRefCASRejectsTraversalName`
 (the purely-local path).
 
+#### `HashFromHex` accepted the wrong length — hardened, not a confirmed exploit (2026-08-25)
+
+Different in kind from the two findings above, and worth being honest
+about the difference: this is a defensive-hardening fix, not a proven
+vulnerability. Noticed while reading the hash-parsing code adjacent to
+the ref-name fix, not from a live-reproduced attack.
+
+`hex.DecodeString` only rejects malformed hex (bad characters, odd
+length); it says nothing about the *decoded* length. `HashFromHex`
+then did `copy(h[:], b)` unconditionally, so any valid-hex string
+shorter than 32 bytes silently zero-padded into a real `Hash` value
+with no error — for the shortest inputs (e.g. `"00"`, or even `""`),
+that value is the zero hash itself, the sentinel this codebase uses
+everywhere to mean "no such ref" / "no dependency" (`Hash.IsZero`'s
+callers). A too-long input silently truncated the same way. Unlike
+`FileChange.Path` or ref names, this alone isn't a path-traversal
+vector — `Hash.String()` always re-encodes to a canonical 64-char
+string, so a mis-parsed `Hash` still only ever resolves to a
+normal-looking, on-tree path — and no concrete scenario turned up
+where coercing to the zero-hash sentinel grants a capability the
+protocol didn't already expose by legitimately sending that exact
+sentinel value. Still, it's the same shape of "accepts more than it
+should" that both of the findings above turned out to be exploitable
+elsewhere, so it's fixed the same way: reject outright
+(`len(b) != len(h)`) instead of silently coercing. Covered by
+`TestHashFromHexRejectsWrongLength` / `TestHashFromHexRoundTrip` in
+`objstore/patches/patch_test.go`.
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:
