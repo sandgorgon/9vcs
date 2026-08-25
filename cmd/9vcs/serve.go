@@ -21,6 +21,7 @@ func cmdServe(args []string) error {
 	maxConns := fs.Int("max-conns", 64, "reject new connections once this many are live at once")
 	maxConnsPerIPPerMin := fs.Int("max-conns-per-ip-per-min", 30, "reject a remote address's new connections once it exceeds this many within a minute")
 	maxRequestsPerConn := fs.Int("max-requests-per-conn", 16, "cap how many requests from one connection are dispatched at once (0 = unlimited); a client can still pipeline more, they just wait for a slot")
+	maxConnWriteBuffer := fs.Int64("max-conn-write-buffer", 2*vcsfs.MaxObjectSize, "cap how many bytes one connection may have buffered across all its open (un-Tclunk'd) writes at once")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -89,6 +90,11 @@ func cmdServe(args []string) error {
 		// connection, before any 9P messages are read on it, to attach
 		// the verified peer's permission to that connection's requests.
 		ConnContext: func(ctx context.Context, nc net.Conn) context.Context {
+			// Attached unconditionally, before the TLS/permission checks
+			// below (which can return early on failure): every connection
+			// that reaches Attach at all, at whatever permission tier,
+			// shares one write-buffer budget — see vcsfs.WithWriteBudget.
+			ctx = vcsfs.WithWriteBudget(ctx, *maxConnWriteBuffer)
 			tlsConn, ok := nc.(*tls.Conn)
 			if !ok {
 				return ctx

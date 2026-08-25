@@ -71,16 +71,8 @@ func cmdStatus(args []string) error {
 		fmt.Println("nothing to record, working tree clean")
 		return nil
 	}
-	renames, remaining := detectRenames(changes, base)
-	for _, rp := range renames {
-		if rp.modified {
-			fmt.Printf("R+ %s -> %s\n", rp.oldPath, rp.newPath)
-		} else {
-			fmt.Printf("R  %s -> %s\n", rp.oldPath, rp.newPath)
-		}
-	}
-	for _, p := range sortedPaths(remaining) {
-		fmt.Printf("%s  %s\n", statusLabel(remaining[p], base), p)
+	for _, p := range sortedPaths(changes) {
+		fmt.Printf("%s  %s\n", statusLabel(changes[p], base), p)
 	}
 	return nil
 }

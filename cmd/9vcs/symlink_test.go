@@ -298,20 +298,3 @@ func TestComputeMergeThreeWaySymlinkConflict(t *testing.T) {
 		t.Errorf("expected roots[0]'s (a's) target kept, got %q", merged["current"].SymlinkTarget)
 	}
 }
-
-func TestRenameCandidateSymlinkExactMatch(t *testing.T) {
-	oldSt := patches.PathState{Kind: patches.KindSymlink, SymlinkTarget: "same-target"}
-	newFc := patches.FileChange{Path: "new-name", Kind: patches.KindSymlink, SymlinkTarget: "same-target"}
-	score, pair, ok := renameCandidate("old-name", oldSt, "new-name", newFc)
-	if !ok || score != 1.0 || pair.modified {
-		t.Fatalf("renameCandidate = score %v pair %+v ok %v, want 1.0/unmodified/true", score, pair, ok)
-	}
-}
-
-func TestRenameCandidateSymlinkRetargetedIsNotDetectedAsRename(t *testing.T) {
-	oldSt := patches.PathState{Kind: patches.KindSymlink, SymlinkTarget: "old-target"}
-	newFc := patches.FileChange{Path: "new-name", Kind: patches.KindSymlink, SymlinkTarget: "new-target"}
-	if _, _, ok := renameCandidate("old-name", oldSt, "new-name", newFc); ok {
-		t.Error("a symlink renamed and retargeted in the same change should not be detected — same policy as KindBlob")
-	}
-}

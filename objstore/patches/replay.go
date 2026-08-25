@@ -2,8 +2,8 @@ package patches
 
 import (
 	"bytes"
+	"container/heap"
 	"errors"
-	"sort"
 )
 
 // PathState is one path's materialized state at some point in history: a
@@ -77,15 +77,42 @@ func Closure(store *Store, roots ...Hash) (map[Hash]bool, error) {
 	return set, nil
 }
 
+// hashHeap is a container/heap min-heap of patch hashes ordered by byte
+// value — the deterministic tie-break topoOrder needs, kept at O(log n)
+// per push/pop instead of re-sorting the whole ready set on every pop (see
+// topoOrder's doc comment for why that mattered).
+type hashHeap []Hash
+
+func (h hashHeap) Len() int           { return len(h) }
+func (h hashHeap) Less(i, j int) bool { return bytes.Compare(h[i][:], h[j][:]) < 0 }
+func (h hashHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *hashHeap) Push(x any)        { *h = append(*h, x.(Hash)) }
+func (h *hashHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
 // topoOrder orders closure so every patch comes after all of its
 // dependencies, breaking ties between independently-ready patches by hash
 // so replay is reproducible regardless of what order they were discovered
 // in — required for two peers to materialize the same bytes from the same
 // patch set.
+//
+// The ready set is a hashHeap, not a plain slice re-sorted on every pop:
+// closure's patches can arrive from a remote peer (vcsfs's Twalk/Tcreate
+// path, or import/reconcile's sync), and nothing stops an adversarial peer
+// from storing many cheap, mutually-independent (zero-dependency) patches
+// — every one of them starts in ready at once. A full re-sort per pop made
+// that O(n² log n) over the closure size, a real CPU-exhaustion cost
+// reachable from ordinary Materialize/History/Closure/UniqueChanges calls
+// over stored-but-unreplayed patches; the heap keeps it O(n log n).
 func topoOrder(closure map[Hash]*Patch) ([]Hash, error) {
 	remaining := make(map[Hash]int, len(closure))
 	dependents := map[Hash][]Hash{}
-	var ready []Hash
+	ready := &hashHeap{}
 	for h, p := range closure {
 		remaining[h] = len(p.Dependencies)
 		for _, d := range p.Dependencies {
@@ -94,20 +121,19 @@ func topoOrder(closure map[Hash]*Patch) ([]Hash, error) {
 	}
 	for h, n := range remaining {
 		if n == 0 {
-			ready = append(ready, h)
+			*ready = append(*ready, h)
 		}
 	}
+	heap.Init(ready)
 
 	order := make([]Hash, 0, len(closure))
-	for len(ready) > 0 {
-		sort.Slice(ready, func(i, j int) bool { return bytes.Compare(ready[i][:], ready[j][:]) < 0 })
-		h := ready[0]
-		ready = ready[1:]
+	for ready.Len() > 0 {
+		h := heap.Pop(ready).(Hash)
 		order = append(order, h)
 		for _, dep := range dependents[h] {
 			remaining[dep]--
 			if remaining[dep] == 0 {
-				ready = append(ready, dep)
+				heap.Push(ready, dep)
 			}
 		}
 	}

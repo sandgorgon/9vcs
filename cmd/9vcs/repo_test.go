@@ -132,6 +132,36 @@ func TestMergeHeadsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSetMergeHeadsAndSidecarsWriteAtomically is the regression test for
+// setMergeHeads/setMergeSidecars using plain os.WriteFile — unlike every
+// other ref/HEAD write in this package — which meant a crash mid-write
+// could leave a truncated MERGE_HEAD/MERGE_SIDECARS behind. Both now go
+// through atomicWriteFile (temp file + rename), same as
+// TestAtomicWriteFileLeavesNoTempFile verifies for the primitive itself;
+// this just confirms the two merge-state writers actually route through
+// it and leave no leftover .tmp file.
+func TestSetMergeHeadsAndSidecarsWriteAtomically(t *testing.T) {
+	r := newTestRepo(t)
+
+	a, err := r.store.Put(&patches.Patch{Message: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.setMergeHeads([]patches.Hash{a}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(r.mergeHeadFile() + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("expected no leftover MERGE_HEAD.tmp, stat err = %v", err)
+	}
+
+	if err := r.setMergeSidecars([]string{"logo.png.abcdef123456"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(r.mergeSidecarsFile() + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("expected no leftover MERGE_SIDECARS.tmp, stat err = %v", err)
+	}
+}
+
 func TestSetRefHashCASRejectsUnknownPatch(t *testing.T) {
 	r := newTestRepo(t)
 	var unknown patches.Hash
