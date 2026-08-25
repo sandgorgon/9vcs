@@ -39,6 +39,8 @@ func main() {
 		err = cmdImport(os.Args[2:])
 	case "reconcile":
 		err = cmdReconcile(os.Args[2:])
+	case "bundle":
+		err = cmdBundle(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -74,6 +76,12 @@ commands:
   reconcile [-peer-fingerprint <hex>] <addr> <ref-name> [<local-name>]
                                sync a ref with a peer: pull if they're ahead, push if you are,
                                or fetch and defer to merge on real divergence
+  bundle export [-m MSG] -o FILE <ref-or-hash>...
+                               export patches (and their full dependency closure) to a signed,
+                               offline .9vp file — flags before the ref/hash arguments
+  bundle show <file>           inspect a bundle's signer, message, and patches without storing anything
+  bundle import <file>         verify a bundle's signature and add its patches/blobs locally;
+                               touches no ref — review with diff/merge before it's integrated
 
 -peer-fingerprint pins the expected peer explicitly for one call; omit it to use
 this install's known-peers store instead (~/.config/9vcs/known-peers on Linux),

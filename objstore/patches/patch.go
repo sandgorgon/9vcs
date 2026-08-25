@@ -234,9 +234,9 @@ func Decode(data []byte) (*Patch, error) {
 		return nil, fmt.Errorf("patch: unrecognized format byte %d (want %d) — pre-release, so this is almost certainly stale data from before a format change, not a version to support", v, patchFormatVersion)
 	}
 	p := &Patch{}
-	nDeps, err := readInt64(r)
+	nDeps, err := readCount(r, "patch: decode dependency count")
 	if err != nil {
-		return nil, fmt.Errorf("patch: decode dependency count: %w", err)
+		return nil, err
 	}
 	p.Dependencies = make([]Hash, nDeps)
 	for i := range p.Dependencies {
@@ -259,9 +259,9 @@ func Decode(data []byte) (*Patch, error) {
 		return nil, fmt.Errorf("patch: decode message: %w", err)
 	}
 	p.Message = msg
-	nChanges, err := readInt64(r)
+	nChanges, err := readCount(r, "patch: decode change count")
 	if err != nil {
-		return nil, fmt.Errorf("patch: decode change count: %w", err)
+		return nil, err
 	}
 	p.Changes = make([]FileChange, 0, nChanges)
 	for i := int64(0); i < nChanges; i++ {
@@ -281,9 +281,9 @@ func Decode(data []byte) (*Patch, error) {
 		if _, err := io.ReadFull(r, blob[:]); err != nil {
 			return nil, fmt.Errorf("patch: decode change %d blob: %w", i, err)
 		}
-		nOps, err := readInt64(r)
+		nOps, err := readCount(r, fmt.Sprintf("patch: decode change %d op count", i))
 		if err != nil {
-			return nil, fmt.Errorf("patch: decode change %d op count: %w", i, err)
+			return nil, err
 		}
 		ops := make([]LineOp, 0, nOps)
 		for j := int64(0); j < nOps; j++ {
@@ -327,7 +327,7 @@ func Decode(data []byte) (*Patch, error) {
 }
 
 func readString(r *bytes.Reader) (string, error) {
-	n, err := readInt64(r)
+	n, err := readCount(r, "patch: decode string length")
 	if err != nil {
 		return "", err
 	}
@@ -336,6 +336,30 @@ func readString(r *bytes.Reader) (string, error) {
 		return "", err
 	}
 	return string(buf), nil
+}
+
+// readCount reads a length-prefixed count or size and validates it
+// against how many bytes actually remain in r before returning. Every
+// count that goes on to size a make() — a slice length/capacity, or
+// readString's buffer — is read through this, not readInt64 directly,
+// so corrupted or adversarial input (e.g. a patch fetched over the
+// network, or decoded from a shared bundle file) produces a clean
+// decode error instead of an out-of-range allocation panic. This is a
+// loose bound (it doesn't account for each element's real size, just
+// caps the count at the raw byte count remaining), which is enough:
+// it's what stands between a corrupted length field and make() trying
+// to allocate an absurd amount, not a precise validity check — a count
+// that passes this but is still too large for what follows fails
+// cleanly at the next read instead.
+func readCount(r *bytes.Reader, what string) (int64, error) {
+	n, err := readInt64(r)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", what, err)
+	}
+	if n < 0 || n > int64(r.Len()) {
+		return 0, fmt.Errorf("%s: implausible length %d (%d bytes remain)", what, n, r.Len())
+	}
+	return n, nil
 }
 
 func readBool(r *bytes.Reader) (bool, error) {

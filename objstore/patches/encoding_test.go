@@ -1,8 +1,10 @@
 package patches
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"testing"
 	"time"
 )
@@ -156,5 +158,26 @@ func TestDecodeRejectsUnrecognizedFormatByte(t *testing.T) {
 func TestDecodeEmptyData(t *testing.T) {
 	if _, err := Decode(nil); err == nil {
 		t.Fatal("expected an error decoding empty data, got nil")
+	}
+}
+
+// TestDecodeRejectsImplausibleLength is a regression for a real crash
+// found via live testing of bundle export/import: a corrupted or
+// adversarial length-prefixed count (here, the dependency count) used to
+// panic make() with "len out of range" instead of returning a decode
+// error. Every length-prefixed count now goes through readCount, which
+// bounds it against the bytes actually remaining before it's ever used
+// to size an allocation.
+func TestDecodeRejectsImplausibleLength(t *testing.T) {
+	var buf bytes.Buffer
+	buf.WriteByte(patchFormatVersion)
+	// A dependency count larger than any plausible input, well beyond
+	// what's actually left in the buffer.
+	var countBytes [8]byte
+	binary.BigEndian.PutUint64(countBytes[:], 1<<62)
+	buf.Write(countBytes[:])
+
+	if _, err := Decode(buf.Bytes()); err == nil {
+		t.Fatal("expected an error decoding an implausible dependency count, got nil")
 	}
 }

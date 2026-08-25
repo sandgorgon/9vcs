@@ -430,7 +430,7 @@ independently-addressable patch instead of a whole-branch diff.
 needed.**
 
 ```
-9vcs bundle export <patch-range> -o fix-parser.9vp   # sender
+9vcs bundle export -o fix-parser.9vp <patch-range>   # sender (flags before the ref/hash args — see below)
 9vcs bundle import fix-parser.9vp                     # recipient
 ```
 
@@ -507,13 +507,18 @@ separate hash-pinning is needed for the patches/blobs inside a verified
 bundle either — `Store.Put`/`BlobStore.Put` re-derive their hash from
 content on the way in regardless, same as every other write path.
 
-**`9vcs bundle export <ref-or-hash>... -o file.9vp`**: resolves each arg
-the way `repo.resolveRef` already does (branch name, then full/abbreviated
-patch hash), unions their closures via `patches.Closure`, fetches the
-actual `Patch` objects via `store.Get`, collects any `KindBlob` content
-those patches reference, signs the payload with this install's identity
-key, writes the file. `-o` is required — no accidental binary-to-terminal
-default.
+**`9vcs bundle export [-m MSG] -o file.9vp <ref-or-hash>...`**: resolves
+each arg the way `repo.resolveRef` already does (branch name, then
+full/abbreviated patch hash), unions their closures via `patches.Closure`,
+fetches the actual `Patch` objects via `store.Get`, collects any
+`KindBlob` content those patches reference, signs the payload with this
+install's identity key, writes the file. `-o` is required — no accidental
+binary-to-terminal default. Flags come *before* the ref/hash arguments,
+not after (a real bug caught by live testing, not just a style choice):
+Go's `flag` package stops parsing flags at the first non-flag argument,
+so `-o`/`-m` placed after a variable-length list of positional args
+never actually get parsed as flags — every other multi-arg command in
+this CLI already follows flags-then-positionals for the same reason.
 
 **`9vcs bundle import <file>`**: decodes, verifies the Ed25519 signature,
 `store.Put`s every patch and blob, prints the signer's fingerprint +
@@ -767,13 +772,61 @@ used to say:
   `TestPatchWriteSignedAuthorshipAccepted` cover the same over a real 9P
   connection, confirming a forged claim is refused before it's ever
   stored under any hash.
+- Bundle export/import: built and verified live, exactly as scoped under
+  decision #8. New `bundle/` package (`Export`, `Decode`, `Bundle.Verify`,
+  `Bundle.Store`) plus `cmd/9vcs/bundle.go`'s `export`/`show`/`import`
+  subcommands. `.9vp` files are magic+version+signerPub+signature+payload,
+  signed with this install's identity key over the payload bytes exactly
+  as read off the wire — no re-encode round-trip needed to verify, same
+  as everywhere else in this design. `export` unions the closures of
+  however many `<ref-or-hash>` args are given (`patches.Closure` is
+  already variadic) and pulls in any `KindBlob` content those patches
+  reference; `import` verifies the signature, `Store`s every patch/blob
+  (content-addressed, so naturally idempotent, no separate hash-pinning
+  needed), and touches no ref — matching decision #8, nothing is
+  integrated until a human reviews with `diff`/`show` and runs `merge`
+  selectively. `apply` itself stayed out of scope, as originally
+  planned. Verified live end-to-end: a sender exports two patches to a
+  file, a completely separate repo/identity `show`s it (pure inspection,
+  no storage touched), `import`s it (patches present locally, `log` on
+  `main` still empty — no ref moved), then `diff`/`merge`s the imported
+  hash to bring the content in.
+
+  Two real bugs found and fixed via that live testing, not caught by
+  unit tests alone: (1) the originally-scoped/documented command syntax
+  (`bundle export <ref-or-hash>... -o file.9vp`, flags *after* the
+  positional args) doesn't actually work — Go's `flag` package stops
+  parsing flags at the first non-flag argument, so `-o`/`-m` placed after
+  a variable-length ref/hash list are silently swallowed as extra
+  positional args instead of being parsed; fixed to flags-first
+  (`bundle export [-m MSG] -o file.9vp <ref-or-hash>...`), matching every
+  other multi-arg command in this CLI. (2) `patches.Decode` (and the new
+  `bundle.Decode`, which copied the same shape) could panic — `makeslice:
+  len out of range` — on a corrupted or adversarial length-prefixed count
+  (dependency count, string length, change/op count, or in bundle's case
+  patch/blob count and length), because nothing validated a count against
+  how many bytes were actually left before using it to size a `make()`.
+  Found by literally corrupting a byte in an exported `.9vp` file and
+  running `bundle show` on it. Fixed with a new `readCount` helper (in
+  both `objstore/patches` and `bundle`) that bounds every such count
+  against the reader's remaining length before it's used, turning a crash
+  into a clean decode error — this closes a real, network-reachable
+  robustness gap (`import`/`reconcile` already fed untrusted peer bytes
+  through the same `patches.Decode`, and the fix now applies there too),
+  not just a bundle-specific one.
 
 ## Open items to revisit
 
-- Bundle export/import (decision #8: signed, offline patch exchange)
-  isn't built. Concrete scope (wire format, package layout, CLI surface)
-  is now written up under decision #8's "Bundle export/import — concrete
-  scope" subsection, as of 2026-08-24 — implementation not started.
+- Bundle export/import (decision #8: signed, offline patch exchange) is
+  now built — see Status. `apply` (selective, chainable integration of
+  specific patches from an imported bundle) is still not built and
+  remains genuinely open: `merge.go` already accepts a bare patch hash
+  as its target, so applying one selected patch likely falls out of the
+  existing two-way merge machinery as-is, but chaining several in one
+  `apply` call needs either an auto-record between each clean merge or a
+  true N-way merge patch — undecided, revisit when `apply` is scoped.
+  The optional live `/offers` variant (decision #8, `propose` permission
+  tier) is also still unbuilt.
 - `Patch.Author` end to end is now fully built: Tier 1 (configurable
   `user.name`/`user.email`, no wire format change) and
   `AuthorFingerprint`/`AuthorSignature` (real per-patch signing verified
