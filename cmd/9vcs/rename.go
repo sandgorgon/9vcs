@@ -145,11 +145,15 @@ func renameCandidate(oldPath string, oldSt patches.PathState, newPath string, ne
 		// correctly catches a huge file renamed with zero changes, which
 		// the size bound below would otherwise reject outright even
 		// though detecting *that* case never needed the expensive path.
-		oldContent := make([]string, len(oldLines))
-		for i, l := range oldLines {
-			oldContent[i] = l.Content
-		}
-		if hashLines(oldContent) == hashLines(newContent) {
+		//
+		// hashGraphLines/hashLines each stream content straight into
+		// one sha256.Hash rather than joining everything into one big
+		// string first -- a single hash of the whole file either way,
+		// just without doubling peak memory on a huge file by building
+		// that intermediate joined copy (or, before this change, an
+		// intermediate []string copy of oldLines just to satisfy
+		// hashLines' old signature).
+		if hashGraphLines(oldLines) == hashLines(newContent) {
 			return 1.0, renamePair{oldPath: oldPath, newPath: newPath, oldState: oldSt, newKind: patches.KindText, modified: false}, true
 		}
 		if int64(len(oldLines))*int64(len(newContent)) > maxRenameDiffCells {
@@ -202,10 +206,29 @@ func insertedContent(ops []patches.LineOp) []string {
 // between lines (never itself a legal line character, since content
 // comes from already-split lines) keeps ["ab", "c"] from hashing the
 // same as ["a", "bc"].
+//
+// Streaming each line into one sha256.Hash — rather than joining every
+// line into a single string first and hashing that — still produces one
+// hash for the whole file, just without a second full-size copy of it
+// sitting in memory at once.
 func hashLines(lines []string) [32]byte {
 	h := sha256.New()
 	for _, l := range lines {
 		h.Write([]byte(l))
+		h.Write([]byte{'\n'})
+	}
+	var sum [32]byte
+	copy(sum[:], h.Sum(nil))
+	return sum
+}
+
+// hashGraphLines is hashLines for a FileGraph's []patches.Line — lets
+// renameCandidate hash oldLines' content directly, without first copying
+// it out into a throwaway []string just to satisfy hashLines' signature.
+func hashGraphLines(lines []patches.Line) [32]byte {
+	h := sha256.New()
+	for _, l := range lines {
+		h.Write([]byte(l.Content))
 		h.Write([]byte{'\n'})
 	}
 	var sum [32]byte
