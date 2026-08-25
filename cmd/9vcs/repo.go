@@ -364,6 +364,42 @@ func binaryConflictSidecar(path string, side patches.Hash) string {
 	return path + "." + side.String()[:12]
 }
 
+// writeSidecarFile writes a binary-conflict comparison sidecar's content,
+// confined to r.root via os.Root — the same real, live-proven bug class
+// writeWorkingTree was fixed for (see its doc comment): sidecar's path
+// string is a legitimate join of an already-validated tracked path plus a
+// hash suffix, but a plain filepath.Join+os.WriteFile still follows
+// whatever's *already on disk* at an intermediate path component. A
+// symlink there — planted by an earlier, unrelated, already-recorded
+// commit, or simply pre-existing in the victim's working tree (e.g. a
+// symlinked vendor/ or build-cache dir) — sends this write straight
+// outside the repo. os.Root refuses that the same way it does for
+// writeWorkingTree.
+func writeSidecarFile(r *repo, sidecar string, data []byte) error {
+	root, err := os.OpenRoot(r.root)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	rel := filepath.FromSlash(sidecar)
+	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return err
+	}
+	return root.WriteFile(rel, data, 0o644)
+}
+
+// removeSidecarFile removes a sidecar written by writeSidecarFile, same
+// os.Root confinement as the write side. Mirrors plain os.Remove's
+// ErrNotExist-is-fine contract that callers already relied on.
+func removeSidecarFile(r *repo, sidecar string) error {
+	root, err := os.OpenRoot(r.root)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.Remove(filepath.FromSlash(sidecar))
+}
+
 // setMergeSidecars records every sidecar path merge wrote, so record knows
 // what to clean up once it finalizes — these are merge tooling, not
 // content the user asked to track.

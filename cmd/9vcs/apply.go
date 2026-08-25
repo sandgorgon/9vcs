@@ -3,8 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
@@ -153,11 +151,7 @@ func cmdApply(args []string) error {
 				return fmt.Errorf("reading blob for %s: %w", c.Path, err)
 			}
 			sidecar := binaryConflictSidecar(c.Path, t)
-			full := filepath.Join(r.root, filepath.FromSlash(sidecar))
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				return err
-			}
-			if err := os.WriteFile(full, data, 0o644); err != nil {
+			if err := writeSidecarFile(r, sidecar, data); err != nil {
 				return fmt.Errorf("writing %s: %w", sidecar, err)
 			}
 			sidecars = append(sidecars, sidecar)
