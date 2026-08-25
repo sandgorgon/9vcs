@@ -7,6 +7,10 @@ import (
 	"os"
 )
 
+// version is overridden at build time via
+// -ldflags "-X main.version=vX.Y.Z" (see .github/workflows/release.yml).
+var version = "dev"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -50,6 +54,9 @@ func main() {
 	case "help", "-h", "--help":
 		usage()
 		return
+	case "version", "-v", "--version":
+		fmt.Println("9vcs " + version)
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "9vcs: unknown command %q\n", os.Args[1])
 		usage()
@@ -62,8 +69,8 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `usage: 9vcs <command> [arguments]
-
+	fmt.Fprintf(os.Stderr, "usage: 9vcs <command> [arguments]  (9vcs %s)\n", version)
+	fmt.Fprint(os.Stderr, `
 commands:
   init                        initialize a repository in the current directory
   record -m MSG               record a patch from the current working tree changes
@@ -99,6 +106,8 @@ commands:
   offer apply <addr> <id>      fetch + verify + store one offer locally (needs write permission
                                on the peer); touches no ref — review, then run 9vcs apply <hash>
   offer remove <addr> <id>     clear a handled offer from a peer's queue (needs write permission)
+  version                      print the 9vcs version
+  help                         show this message
 
 -peer-fingerprint pins the expected peer explicitly for one call; omit it to use
 this install's known-peers store instead (~/.config/9vcs/known-peers on Linux),
