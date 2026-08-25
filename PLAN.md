@@ -662,6 +662,47 @@ Re-ran the exact original reproduction live against the rebuilt binary
 the recorded content is genuinely correct, not just coincidentally
 "clean" (`cat f.txt` shows the real kept content).
 
+#### Concurrent identical-content Put race — found and fixed (2026-08-25)
+
+`rawStore.put` (`objstore/patches/rawstore.go`) used a temp filename
+derived only from the content hash (`path + ".tmp"`). Two concurrent
+`Put` calls for the *same* content — a real, reachable scenario: two
+peer connections relaying the same patch to one `9vcs serve` process at
+once, each its own goroutine per the library's own concurrency model —
+shared that temp filename, so one writer could create/rename it out from
+under the other. Reproduced live before the fix: a spurious "permission
+denied" (the first writer's read-only temp file already sitting at that
+exact path when the second tried to create it) on an otherwise
+completely harmless race — the content two concurrent callers write here
+is identical by construction, since it's keyed by its own hash. Fixed
+with `os.CreateTemp` for a unique-per-call name, plus a fallback check
+(if `os.Rename` still somehow fails, re-`Stat` the target — a concurrent
+writer having already placed it there is success, not failure, for a
+content-addressed, idempotent `Put`). Verified: `TestConcurrentPutSameContentDoesNotError`
+(20 goroutines writing identical content, 5 attempts, under `-race`) —
+reproduced the original failure against the pre-fix code first, then
+confirmed clean after.
+
+#### Unbounded rename-detection diff cost — found and fixed (2026-08-25)
+
+`patches.Diff`'s underlying LCS (`objstore/patches/diff.go`) is a
+textbook O(n·m) dynamic program — a full 2D table, not just
+O(min(n,m)) — in both time *and* memory. `detectRenames`
+(`cmd/9vcs/rename.go`) calls it for every deleted×added path pair in a
+changeset, so a changeset touching several large text files (plausible
+after `import`/`reconcile` pulls one in from a peer) made an ordinary
+`status`/`diff` attempt a multiplicative pile of expensive diffs the
+user never directly asked for — not a remote-write exploit like the
+traversal bugs above, but a real hang/OOM risk from otherwise-normal
+usage. Fixed with `maxRenameDiffCells`, a bound on the candidate pair's
+line-count product (25,000,000 — comfortably covers two ordinary
+~5,000-line files, rejects a pathological pairing before ever attempting
+it): over the bound, the pair is treated as "not a match" rather than
+scored, the same tradeoff already accepted elsewhere in rename detection
+(losing detection for an extreme case beats hanging on it). Verified:
+`TestRenameCandidateSkipsExpensiveDiffForHugeFiles` uses a pair sized
+well past the threshold and requires the call to return within 5s.
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:

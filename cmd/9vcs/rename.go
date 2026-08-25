@@ -14,6 +14,14 @@ import (
 // don't pair up by coincidence.
 const renameThreshold = 0.5
 
+// maxRenameDiffCells bounds patches.Diff's O(n*m) cost (both time and
+// memory — its LCS is a full 2D table, not just O(min(n,m))) when
+// scoring one candidate text rename. 25,000,000 comfortably covers two
+// ordinary-sized real files (e.g. two ~5,000-line files) while still
+// rejecting the pathological case (a huge generated file, a lockfile,
+// paired against another large one) before ever allocating for it.
+const maxRenameDiffCells = 25_000_000
+
 // renamePair is one detected rename — purely a display-time inference,
 // never anything record actually stores. See PLAN.md's "Rename detection
 // — concrete scope": the underlying patch is still a plain delete of
@@ -125,6 +133,18 @@ func renameCandidate(oldPath string, oldSt patches.PathState, newPath string, ne
 		newContent := insertedContent(newFc.Ops)
 		if len(oldLines) == 0 || len(newContent) == 0 {
 			return 0, renamePair{}, false // no rename detection for an empty file on either side — nothing to meaningfully compare
+		}
+		if int64(len(oldLines))*int64(len(newContent)) > maxRenameDiffCells {
+			// patches.Diff's underlying LCS is O(n*m) in both time and
+			// memory (a full 2D table, not just O(min(n,m))) — and
+			// detectRenames tries every deleted×added pair, so without
+			// this bound, a changeset touching several large text files
+			// (e.g. pulled in via import/reconcile) makes an ordinary
+			// `status`/`diff` attempt a multiplicative pile of expensive
+			// diffs the user never directly asked for, not just one.
+			// Losing rename detection for a genuinely huge pair is a far
+			// better tradeoff than hanging or exhausting memory on it.
+			return 0, renamePair{}, false
 		}
 		ops, _ := patches.Diff(oldLines, newContent)
 		deleted := 0
