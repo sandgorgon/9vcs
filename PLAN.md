@@ -545,6 +545,57 @@ comfortably *under* the new 1GiB cap and remains correctly allowed):
 heap growth dropped from ~400MB to ~0MB, confirming the rejection
 happens before any allocation, not after a partial one.
 
+#### Symlink path traversal via an intermediate component — found and fixed (2026-08-25)
+
+**A second, distinct traversal vector, found auditing `writeWorkingTree`
+after the `../`-string fix already existed — and not caught by it.**
+`validPath` (the earlier fix) only rejects a literal `..` *segment* in
+the path *string*. It has nothing to say about a path like
+`evil/nested/proof.txt` — perfectly canonical, no `..` anywhere — where
+`evil` is *itself* a tracked symlink pointing outside the repo. Two
+`FileChange`s (a `KindSymlink` at `evil`, plus any ordinary change at
+`evil/nested/proof.txt`) are each individually valid; `writeWorkingTree`
+built the write target with a plain `filepath.Join(r.root, ...)` and
+handed it to `os.MkdirAll`/`os.WriteFile`, which — like any POSIX path
+resolution — follows a symlink at *any* intermediate component, not
+just the final one. The existing symlink-clearing logic only ever
+`Lstat`'d the *final* component, so it caught "this leaf is a stale
+symlink" but had nothing to say about "an ancestor directory of this
+leaf is a symlink."
+
+**Proven live**: a hand-crafted patch with exactly those two changes,
+applied against a real repo, wrote `proof.txt` into a directory
+completely outside it, through the `evil` symlink — confirmed by
+locating the file at the symlink's target, not inside the repo.
+
+**Fix: `os.Root`** (`writeWorkingTree`, `cmd/9vcs/workingtree.go`) — a
+stdlib API purpose-built for exactly this (added specifically to let
+code work with untrusted path components without a symlink escaping a
+directory tree): every operation goes through an `os.Root` opened at
+`r.root` instead of a bare `os.*` call on a manually-joined path. `Root`
+follows a symlink that resolves *within* the root, but refuses one that
+would leave it, and refuses an absolute-target symlink as an
+intermediate component outright — while still allowing an absolute
+target to be *created* as a leaf symlink (creating one doesn't require
+resolving where it points), so the legitimate case
+(`bin/env -> /usr/bin/env`) is unaffected. `record.go`'s modify/delete-
+conflict-resolution snippet — the one other place in this codebase that
+reads working-tree content by path outside `changedFiles` (which is
+safe by construction: its paths come from an actual `filepath.WalkDir`,
+which never descends into a symlink to discover a path beneath it) —
+was converted to the same `os.Root`-confined reads, for the same reason
+and consistency, not because a live exploit was separately built for it.
+
+**Verified**: `TestWriteWorkingTreeRefusesSymlinkPathEscape` reproduces
+the exact live-proven case and asserts both the error and that nothing
+landed outside the repo; `TestWriteWorkingTreeAllowsAbsoluteTargetLeafSymlink`
+guards against a regression of the legitimate case. Re-ran the original
+live exploit against the fixed binary: `apply` now fails cleanly
+(`"mkdirat evil/nested: path escapes from parent"`) and the file never
+appears outside the repo. Live-reconfirmed the legitimate absolute-target
+leaf symlink case round-trips correctly end to end (record, delete,
+checkout from scratch, `readlink` matches).
+
 ### 2. Workspace = private namespace, built as a union (no staging/index)
 
 A workspace is the union of:
