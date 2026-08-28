@@ -14,14 +14,14 @@ import (
 	"github.com/sandgorgon/9p/client"
 	"github.com/sandgorgon/9p/server"
 
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
-	"github.com/sandgorgon/9vcs/identity"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
 // dialWith starts a server for fs with the given ConnContext permission
 // and returns a connected, attached client.
-func dialWith(t *testing.T, fs *FS, perm identity.Permission) *client.Client {
+func dialWith(t *testing.T, fs *FS, perm auth.Permission) *client.Client {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -59,7 +59,7 @@ func newTestFS(t *testing.T) (*FS, fakeRefs) {
 
 func TestPatchWriteRoundTrip(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	p := &patches.Patch{Message: "pushed patch"}
 	data := p.Encode()
@@ -103,7 +103,7 @@ func TestPatchWriteRoundTrip(t *testing.T) {
 // TestCloseErrorsPropagateThroughDispatch).
 func TestPatchWriteWrongHashRejected(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	p := &patches.Patch{Message: "real content"}
 	realHash := p.Hash()
@@ -141,7 +141,7 @@ func TestPatchWriteWrongHashRejected(t *testing.T) {
 // since this check runs before Store.Put at all.
 func TestPatchWriteForgedAuthorshipRejected(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	victimPub, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -177,7 +177,7 @@ func TestPatchWriteForgedAuthorshipRejected(t *testing.T) {
 // exactly like an unsigned one.
 func TestPatchWriteSignedAuthorshipAccepted(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -215,7 +215,7 @@ func TestPatchWriteSignedAuthorshipAccepted(t *testing.T) {
 // stored under any hash.
 func TestPatchWritePathTraversalRejected(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	p := &patches.Patch{Message: "innocuous-looking commit message", Changes: []patches.FileChange{
 		{Path: "../../../../outside-the-repo.txt", Kind: patches.KindText, TrailingNewline: true,
@@ -249,7 +249,7 @@ func TestPatchWritePathTraversalRejected(t *testing.T) {
 // has (PermPropose, via /offers), not just PermWrite.
 func TestWriteRejectsOversizedOffset(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	p := &patches.Patch{Message: "irrelevant — rejected before content is ever read"}
 	f, err := c.Create("patches/"+p.Hash().String(), 0o644, p9.OWRITE)
@@ -290,7 +290,7 @@ func TestWriteRejectsOverflowingOffset(t *testing.T) {
 
 func TestWriteRejectsNegativeOffset(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	p := &patches.Patch{Message: "irrelevant"}
 	f, err := c.Create("patches/"+p.Hash().String(), 0o644, p9.OWRITE)
@@ -311,7 +311,7 @@ func TestWriteRejectsNegativeOffset(t *testing.T) {
 // write-buffer budget via WithWriteBudget — for exercising the
 // MaxObjectSize-bounds-one-fid-but-nothing-bounded-the-connection-total
 // gap fixed alongside it (see writeBudget's doc comment in vcsfs.go).
-func dialWithBudget(t *testing.T, fs *FS, perm identity.Permission, budget int64) *client.Client {
+func dialWithBudget(t *testing.T, fs *FS, perm auth.Permission, budget int64) *client.Client {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -345,7 +345,7 @@ func dialWithBudget(t *testing.T, fs *FS, perm identity.Permission, budget int64
 // alone is anywhere near MaxObjectSize.
 func TestWriteBudgetRejectsExceedingConnectionTotal(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWithBudget(t, fs, identity.PermWrite, 100)
+	c := dialWithBudget(t, fs, auth.PermWrite, 100)
 
 	p1 := &patches.Patch{Message: "first"}
 	f1, err := c.Create("patches/"+p1.Hash().String(), 0o644, p9.OWRITE)
@@ -372,7 +372,7 @@ func TestWriteBudgetRejectsExceedingConnectionTotal(t *testing.T) {
 // can use.
 func TestWriteBudgetReleasedOnClose(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWithBudget(t, fs, identity.PermWrite, 100)
+	c := dialWithBudget(t, fs, auth.PermWrite, 100)
 
 	p1 := &patches.Patch{Message: "first"}
 	f1, err := c.Create("patches/"+p1.Hash().String(), 0o644, p9.OWRITE)
@@ -396,7 +396,7 @@ func TestWriteBudgetReleasedOnClose(t *testing.T) {
 
 func TestBlobWriteRoundTrip(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	data := []byte("some binary-ish content")
 	// Compute the real hash independently, via a throwaway store — using
@@ -434,7 +434,7 @@ func TestBlobWriteRoundTrip(t *testing.T) {
 
 func TestWriteRequiresPermission(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermRead)
+	c := dialWith(t, fs, auth.PermRead)
 
 	p := &patches.Patch{Message: "should be rejected"}
 	_, err := c.Create("patches/"+p.Hash().String(), 0o644, p9.OWRITE)
@@ -445,7 +445,7 @@ func TestWriteRequiresPermission(t *testing.T) {
 
 func TestRefCreateNew(t *testing.T) {
 	fs, refs := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	target, err := fs.Store.Put(&patches.Patch{Message: "target"})
 	if err != nil {
@@ -472,7 +472,7 @@ func TestRefCreateNew(t *testing.T) {
 
 func TestRefUpdateExistingAndCASConflict(t *testing.T) {
 	fs, refs := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	oldHash, err := fs.Store.Put(&patches.Patch{Message: "old"})
 	if err != nil {
@@ -527,7 +527,7 @@ func TestRefUpdateExistingAndCASConflict(t *testing.T) {
 // workaround this fix let us drop from the push path).
 func TestCloseErrorsPropagateThroughDispatch(t *testing.T) {
 	fs, _ := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	// Any Close() that returns a non-nil error demonstrates this — reuse
 	// the wrong-claimed-hash case, which writeFile.Close reliably rejects.
@@ -594,7 +594,7 @@ func newSignedBundle(t *testing.T) []byte {
 
 func TestOfferPostRoundTrip(t *testing.T) {
 	fs, _ := newTestFSWithOffers(t)
-	c := dialWith(t, fs, identity.PermPropose)
+	c := dialWith(t, fs, auth.PermPropose)
 
 	data := newSignedBundle(t)
 	id := patches.Hash(sha256.Sum256(data))
@@ -633,7 +633,7 @@ func TestOfferPostRoundTrip(t *testing.T) {
 // everything else under Create requires.
 func TestOfferPostRequiresProposePermission(t *testing.T) {
 	fs, _ := newTestFSWithOffers(t)
-	c := dialWith(t, fs, identity.PermRead)
+	c := dialWith(t, fs, auth.PermRead)
 
 	data := newSignedBundle(t)
 	id := patches.Hash(sha256.Sum256(data))
@@ -651,7 +651,7 @@ func TestOfferPostRequiresProposePermission(t *testing.T) {
 // being trustworthy enough to sit in the queue.
 func TestOfferPostInvalidSignatureRejected(t *testing.T) {
 	fs, _ := newTestFSWithOffers(t)
-	c := dialWith(t, fs, identity.PermPropose)
+	c := dialWith(t, fs, auth.PermPropose)
 
 	data := newSignedBundle(t)
 	tampered := append([]byte(nil), data...)
@@ -686,7 +686,7 @@ func TestOfferListing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := dialWith(t, fs, identity.PermRead)
+	c := dialWith(t, fs, auth.PermRead)
 	f, err := c.Open("offers", p9.OREAD)
 	if err != nil {
 		t.Fatalf("Open offers dir: %v", err)
@@ -714,7 +714,7 @@ func TestOfferListing(t *testing.T) {
 // special-cased error, just an ordinary "no such file."
 func TestOffersAbsentWhenNil(t *testing.T) {
 	fs, _ := newTestFS(t) // Offers left nil
-	c := dialWith(t, fs, identity.PermRead)
+	c := dialWith(t, fs, auth.PermRead)
 
 	if _, err := c.Open("offers", p9.OREAD); err == nil {
 		t.Error("expected opening /offers to fail when FS.Offers is nil, got nil")
@@ -730,7 +730,7 @@ func TestOfferRemoveRequiresWritePermission(t *testing.T) {
 	}
 
 	// PermPropose can post but not remove — remove needs PermWrite.
-	c := dialWith(t, fs, identity.PermPropose)
+	c := dialWith(t, fs, auth.PermPropose)
 	root, err := c.Attach("test", "")
 	if err != nil {
 		t.Fatal(err)
@@ -755,7 +755,7 @@ func TestOfferRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 	root, err := c.Attach("test", "")
 	if err != nil {
 		t.Fatal(err)
@@ -774,7 +774,7 @@ func TestOfferRemove(t *testing.T) {
 
 func TestRefCreateAlreadyExistsRejected(t *testing.T) {
 	fs, refs := newTestFS(t)
-	c := dialWith(t, fs, identity.PermWrite)
+	c := dialWith(t, fs, auth.PermWrite)
 
 	existing, err := fs.Store.Put(&patches.Patch{Message: "existing"})
 	if err != nil {

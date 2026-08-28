@@ -12,7 +12,7 @@ import (
 	"github.com/sandgorgon/9p/client"
 	"github.com/sandgorgon/9p/server"
 
-	"github.com/sandgorgon/9vcs/identity"
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -20,7 +20,7 @@ import (
 // perm — these tests aren't exercising authentication (identity's own
 // tests already cover that), just vcsfs's wiring, so there's no peer
 // identity to derive it from.
-func connContextFor(perm identity.Permission) func(context.Context, net.Conn) context.Context {
+func connContextFor(perm auth.Permission) func(context.Context, net.Conn) context.Context {
 	return func(ctx context.Context, _ net.Conn) context.Context {
 		return WithPermission(ctx, perm)
 	}
@@ -84,7 +84,7 @@ func TestPatchesBlobsRefsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	srv := &server.Server{FS: fs, ConnContext: connContextFor(identity.PermRead)}
+	srv := &server.Server{FS: fs, ConnContext: connContextFor(auth.PermRead)}
 	go srv.Serve(ln)
 
 	c, err := client.Dial("tcp", ln.Addr().String())
@@ -270,7 +270,7 @@ func TestDirectoryListingOverTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	srv := &server.Server{FS: fs, ConnContext: connContextFor(identity.PermRead)}
+	srv := &server.Server{FS: fs, ConnContext: connContextFor(auth.PermRead)}
 	go srv.Serve(ln)
 
 	c, err := client.Dial("tcp", ln.Addr().String(), client.WithMsize(128))
@@ -318,7 +318,7 @@ func TestReadOnlyRejectsWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	srv := &server.Server{FS: fs, ConnContext: connContextFor(identity.PermWrite)}
+	srv := &server.Server{FS: fs, ConnContext: connContextFor(auth.PermWrite)}
 	go srv.Serve(ln)
 
 	c, err := client.Dial("tcp", ln.Addr().String())

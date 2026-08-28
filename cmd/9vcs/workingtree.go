@@ -10,7 +10,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/sandgorgon/9vcs/identity"
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -53,7 +53,7 @@ func formatAuthor(name, email string) string {
 
 // signPatch signs patch with this install's identity, in place, before
 // record stores it: sets AuthorFingerprint to the public key and
-// AuthorSignature over patch.SignablePayload(). identity.Load() failing
+// AuthorSignature over patch.SignablePayload(). auth.Load() failing
 // (permissions, disk full, whatever) leaves patch unsigned — a warning
 // on stderr, not a failed record. record is the single most-invoked
 // command; blocking it on an unrelated identity problem for a field
@@ -73,7 +73,7 @@ func formatAuthor(name, email string) string {
 // call afterward is a harmless no-op.
 func signPatch(patch *patches.Patch) {
 	patch.Normalize()
-	id, err := identity.Load()
+	id, err := auth.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: recording unsigned (identity unavailable): %v\n", err)
 		return

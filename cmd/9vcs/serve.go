@@ -12,7 +12,7 @@ import (
 	p9 "github.com/sandgorgon/9p"
 	"github.com/sandgorgon/9p/server"
 
-	"github.com/sandgorgon/9vcs/identity"
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/vcsfs"
 )
 
@@ -35,11 +35,11 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return err
 	}
-	id, err := identity.Load()
+	id, err := auth.Load()
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
-	authorized, err := identity.LoadAuthorizedPeers(r.authorizedPeersFile())
+	authorized, err := auth.LoadAuthorizedPeers(r.authorizedPeersFile())
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
@@ -47,7 +47,7 @@ func cmdServe(args []string) error {
 		fmt.Fprintf(os.Stderr, "9vcs serve: warning: %s is empty or missing; no peer will be able to connect\n", r.authorizedPeersFile())
 	}
 
-	tlsCfg := id.ServerTLSConfig(func(fp string) bool { return authorized.Allows(fp, identity.PermRead) })
+	tlsCfg := id.ServerTLSConfig(func(fp string) bool { return authorized.Allows(fp, auth.PermRead) })
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -114,7 +114,7 @@ func cmdServe(args []string) error {
 			if len(certs) == 0 {
 				return ctx
 			}
-			fp, err := identity.FingerprintOf(certs[0])
+			fp, err := auth.FingerprintOf(certs[0])
 			if err != nil {
 				return ctx
 			}

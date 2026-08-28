@@ -1798,23 +1798,26 @@ recorded decision. No comment thread, matching decision #8's original
                           # requires the "propose" permission tier (narrower than "write")
 ```
 
-## Module layout (proposed, not yet scaffolded)
+## Module layout
 
 ```
 9vcs/
-  go.mod                  # require github.com/sandgorgon/9p
+  go.mod                  # require github.com/sandgorgon/9p, github.com/sandgorgon/9auth
   objstore/patches/        # patch graph encode+hash (SHA-256, stdlib), on-disk CAS, local-only, no network
   synth/                    # replay/materialization engine + in-memory cache, shared by
                              # checkout (write-once-to-disk) and serve --view (live over 9P)
   vcsfs/                    # server.FileSystem + server.File impl of the namespace above,
-                             # including permission checks fed by peer identity
-  identity/                 # Ed25519 keypair, self-signed cert, fingerprint, known-peers/
-                             # authorized-peers file handling, TLS config construction
+                             # including permission checks fed by peer identity (github.com/sandgorgon/9auth)
   merge/                    # conflict resolution patch construction (graph-fork ordering)
   cmd/9vcs/                 # single CLI binary: init, record, log, checkout, branch, diff,
                              # serve, import, reconcile, identity, bundle (export/import/show),
                              # apply, offer (post/list/apply)
 ```
+
+Ed25519 keypair, self-signed cert, fingerprint, known-peers/authorized-peers
+file handling, and TLS config construction used to live in 9vcs's own
+`identity/` package; as of 2026-08-28 that's `github.com/sandgorgon/9auth`
+(package `auth`) instead — see the Status entry below.
 
 (Single `9vcs` binary rather than a separate daemon binary — consistent
 with "usable as a CLI in any environment" and "no default persistent
@@ -2235,6 +2238,23 @@ used to say:
   removal is pure deletion of `cmd/9vcs/rename.go` and its call sites in
   `status.go`/`diff.go` — no patch/graph/replay model ever depended on
   it).
+- Identity extracted to a shared module (2026-08-28, closes #22): 9vcs's
+  own `identity/` package is gone, replaced by `github.com/sandgorgon/9auth`
+  v0.1.0 (package `auth`) — a pure-Go, zero-dependency sibling module, not
+  a subpackage of `9p` (`sandgorgon/9p#2` proposed that but was closed:
+  a TLS/identity/peer-trust layer never touches the 9P wire format and
+  doesn't belong bolted onto the wire-protocol library). Purely
+  mechanical `identity.` → `auth.` rename across every caller; API is
+  identical. `auth.ConfigDir()` moved the shared identity/known-peers
+  location from `~/.config/9vcs` to `~/.config/9` — `auth.Load()` copies
+  an existing `~/.config/9vcs/identity.{key,cert}` forward automatically
+  on first run, so 9vcs needed no migration code of its own for that.
+  `cmd/9vcs/config.go`'s `globalConfigPath()` (the `user.name`/
+  `user.email` file) deliberately did **not** follow that move — it has
+  its own independent `userConfigDir()` pinned to `~/.config/9vcs`, since
+  that file is 9vcs-specific preference data with no migration story.
+  `go.mod` now requires `github.com/sandgorgon/9auth` alongside `9p`; no
+  `replace` directive needed, `9auth` shipped a real tag.
 
 ## Open items to revisit
 

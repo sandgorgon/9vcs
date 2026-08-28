@@ -9,8 +9,8 @@ import (
 	p9 "github.com/sandgorgon/9p"
 	"github.com/sandgorgon/9p/client"
 
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
-	"github.com/sandgorgon/9vcs/identity"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -63,7 +63,7 @@ func cmdOfferPost(args []string) error {
 		roots = append(roots, h)
 	}
 
-	id, err := identity.Load()
+	id, err := auth.Load()
 	if err != nil {
 		return fmt.Errorf("offer: loading identity: %w", err)
 	}
@@ -146,7 +146,7 @@ func cmdOfferList(args []string) error {
 		if !b.Verify() {
 			status = "INVALID SIGNATURE"
 		}
-		fmt.Printf("%s  signer %s (%s)  %d patch(es)  %s\n", st.Name, identity.Fingerprint(b.SignerPub), status, len(b.Patches), b.Message)
+		fmt.Printf("%s  signer %s (%s)  %d patch(es)  %s\n", st.Name, auth.Fingerprint(b.SignerPub), status, len(b.Patches), b.Message)
 	}
 	return nil
 }

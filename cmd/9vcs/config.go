@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-
-	"github.com/sandgorgon/9vcs/identity"
 )
 
 // configKeys are the only keys `9vcs config` currently understands — not
@@ -26,22 +24,39 @@ var configKeys = map[string]bool{
 func repoConfigPath(r *repo) string { return filepath.Join(r.dir, "config") }
 
 // globalConfigPath is this install's user-wide config file, the fallback
-// for any key not set in a repo's local config — same directory identity
-// already owns (identity.key, known-peers), even though this file isn't
-// key material.
+// for any key not set in a repo's local config.
 func globalConfigPath() (string, error) {
-	dir, err := identity.ConfigDir()
+	dir, err := userConfigDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(dir, "config"), nil
 }
 
+// userConfigDir is 9vcs's own ~/.config/9vcs directory — deliberately
+// independent of auth.ConfigDir() (~/.config/9), which moved out from
+// under this path when the identity/known-peers material was extracted
+// into github.com/sandgorgon/9auth. This file (user.name/user.email
+// preferences) isn't key material shared across 9-family programs and
+// has no migration story, so it stays where existing installs already
+// have it.
+func userConfigDir() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "9vcs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // loadConfigFile parses a flat "key = value" file: one entry per line,
 // split on the first '=' only (a value may itself legitimately contain
 // one), both sides trimmed. Blank lines and lines starting with '#' are
 // ignored. A missing file is not an error — same convention
-// identity.LoadKnownPeers uses — it just means nothing is configured
+// auth.LoadKnownPeers uses — it just means nothing is configured
 // there yet.
 func loadConfigFile(path string) (map[string]string, error) {
 	f, err := os.Open(path)
@@ -74,7 +89,7 @@ func loadConfigFile(path string) (map[string]string, error) {
 
 // saveConfigFile writes m back as sorted "key = value" lines, creating
 // path's directory if needed — same overwrite-outright, sorted-for-
-// stable-diffs shape identity.RememberPeer already uses for known-peers.
+// stable-diffs shape auth.RememberPeer already uses for known-peers.
 func saveConfigFile(path string, m map[string]string) error {
 	keys := make([]string, 0, len(m))
 	for k := range m {

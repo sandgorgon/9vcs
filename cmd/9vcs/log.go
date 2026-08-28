@@ -5,7 +5,7 @@ import (
 	"flag"
 	"fmt"
 
-	"github.com/sandgorgon/9vcs/identity"
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -66,7 +66,7 @@ func cmdLog(args []string) error {
 			if !p.VerifyAuthorSignature() {
 				status = "INVALID SIGNATURE"
 			}
-			fmt.Printf("Fingerprint: %s (%s)\n", identity.Fingerprint(ed25519.PublicKey(p.AuthorFingerprint[:])), status)
+			fmt.Printf("Fingerprint: %s (%s)\n", auth.Fingerprint(ed25519.PublicKey(p.AuthorFingerprint[:])), status)
 		}
 		fmt.Printf("Date:   %s\n", p.Time.Local().Format("Mon Jan 2 15:04:05 2006 -0700"))
 		fmt.Printf("\n    %s\n\n", p.Message)
