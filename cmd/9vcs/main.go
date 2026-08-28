@@ -110,7 +110,7 @@ commands:
   help                         show this message
 
 -peer-fingerprint pins the expected peer explicitly for one call; omit it to use
-this install's known-peers store instead (~/.config/9vcs/known-peers on Linux),
+this install's known-peers store instead (~/.config/9/known-peers on Linux),
 which prompts to trust a peer the first time and refuses silently thereafter if
 its fingerprint ever changes. Either path remembers the peer for next time.
 `)

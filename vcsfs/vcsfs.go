@@ -23,8 +23,8 @@ import (
 	p9 "github.com/sandgorgon/9p"
 	"github.com/sandgorgon/9p/server"
 
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
-	"github.com/sandgorgon/9vcs/identity"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -73,12 +73,12 @@ type permKey struct{}
 // WithPermission returns a context carrying perm, for a Server.ConnContext
 // hook to attach once it's authenticated the peer — FS.Attach reads it
 // back via permissionFrom.
-func WithPermission(ctx context.Context, perm identity.Permission) context.Context {
+func WithPermission(ctx context.Context, perm auth.Permission) context.Context {
 	return context.WithValue(ctx, permKey{}, perm)
 }
 
-func permissionFrom(ctx context.Context) (identity.Permission, bool) {
-	p, ok := ctx.Value(permKey{}).(identity.Permission)
+func permissionFrom(ctx context.Context) (auth.Permission, bool) {
+	p, ok := ctx.Value(permKey{}).(auth.Permission)
 	return p, ok
 }
 
@@ -195,7 +195,7 @@ func (k dirKind) name() string {
 type dirFile struct {
 	fs   *FS
 	kind dirKind
-	perm identity.Permission
+	perm auth.Permission
 }
 
 func (d *dirFile) Qid() p9.Qid {
@@ -293,13 +293,13 @@ func (d *dirFile) Open(ctx context.Context, mode p9.Mode) error {
 // normal 9P Tcreate semantics — see refFile).
 // minCreatePermission is the permission each dirKind requires to Create
 // under it. Offers accept the narrower PermPropose — the whole reason
-// that tier exists (see identity.PermPropose's doc comment) — everything
+// that tier exists (see auth.PermPropose's doc comment) — everything
 // else still requires PermWrite.
-func minCreatePermission(k dirKind) identity.Permission {
+func minCreatePermission(k dirKind) auth.Permission {
 	if k == kindOffers {
-		return identity.PermPropose
+		return auth.PermPropose
 	}
-	return identity.PermWrite
+	return auth.PermWrite
 }
 
 func (d *dirFile) Create(ctx context.Context, name string, mode9 p9.Mode, openMode p9.Mode) (server.File, error) {
@@ -381,7 +381,7 @@ type objFile struct {
 	kind dirKind // kindPatches, kindBlobs, or kindOffers
 	name string
 	data []byte
-	perm identity.Permission
+	perm auth.Permission
 }
 
 func (f *objFile) Qid() p9.Qid {
@@ -430,7 +430,7 @@ func (f *objFile) Remove(ctx context.Context) error {
 	if f.kind != kindOffers {
 		return fmt.Errorf("vcsfs: %s is read-only", f.name)
 	}
-	if f.perm < identity.PermWrite {
+	if f.perm < auth.PermWrite {
 		return fmt.Errorf("vcsfs: offers/%s: permission denied", f.name)
 	}
 	h, err := patches.HashFromHex(f.name)
@@ -604,7 +604,7 @@ func (f *writeFile) Close() error {
 type refFile struct {
 	fs      *FS
 	name    string
-	perm    identity.Permission
+	perm    auth.Permission
 	exists  bool
 	current patches.Hash
 	budget  *writeBudget // this fid's connection-wide buffer budget; nil if none attached
@@ -639,7 +639,7 @@ func (f *refFile) Open(ctx context.Context, mode p9.Mode) error {
 		}
 		return nil
 	case p9.OWRITE:
-		if f.perm < identity.PermWrite {
+		if f.perm < auth.PermWrite {
 			return fmt.Errorf("vcsfs: refs/%s: permission denied", f.name)
 		}
 		return nil
@@ -664,7 +664,7 @@ func (f *refFile) Read(ctx context.Context, offset int64, p []byte) (int, error)
 }
 
 func (f *refFile) Write(ctx context.Context, offset int64, p []byte) (int, error) {
-	if f.perm < identity.PermWrite {
+	if f.perm < auth.PermWrite {
 		return 0, fmt.Errorf("vcsfs: refs/%s: permission denied", f.name)
 	}
 	if err := checkWriteSize(offset, p); err != nil {

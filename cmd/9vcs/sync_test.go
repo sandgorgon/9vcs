@@ -5,18 +5,18 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandgorgon/9vcs/identity"
+	"github.com/sandgorgon/9auth"
 )
 
 func TestVerifyPeerPinnedMatchRemembers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known-peers")
-	known := identity.KnownPeers{}
+	known := auth.KnownPeers{}
 
 	if err := verifyPeer(path, known, "peer:1234", "abc123", "abc123", strings.NewReader("")); err != nil {
 		t.Fatalf("verifyPeer: %v", err)
 	}
 
-	got, err := identity.LoadKnownPeers(path)
+	got, err := auth.LoadKnownPeers(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,14 +27,14 @@ func TestVerifyPeerPinnedMatchRemembers(t *testing.T) {
 
 func TestVerifyPeerPinnedMismatchRefuses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known-peers")
-	known := identity.KnownPeers{}
+	known := auth.KnownPeers{}
 
 	err := verifyPeer(path, known, "peer:1234", "expected", "actual", strings.NewReader(""))
 	if err == nil {
 		t.Fatal("expected an error for a pin mismatch, got nil")
 	}
 
-	got, _ := identity.LoadKnownPeers(path)
+	got, _ := auth.LoadKnownPeers(path)
 	if len(got) != 0 {
 		t.Errorf("known-peers should be untouched after a rejected pin, got %v", got)
 	}
@@ -42,7 +42,7 @@ func TestVerifyPeerPinnedMismatchRefuses(t *testing.T) {
 
 func TestVerifyPeerKnownMatchSucceeds(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known-peers")
-	known := identity.KnownPeers{"peer:1234": "abc123"}
+	known := auth.KnownPeers{"peer:1234": "abc123"}
 
 	if err := verifyPeer(path, known, "peer:1234", "", "abc123", strings.NewReader("")); err != nil {
 		t.Fatalf("verifyPeer: %v", err)
@@ -51,7 +51,7 @@ func TestVerifyPeerKnownMatchSucceeds(t *testing.T) {
 
 func TestVerifyPeerKnownMismatchRefusesWithoutPrompting(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known-peers")
-	known := identity.KnownPeers{"peer:1234": "old-fp"}
+	known := auth.KnownPeers{"peer:1234": "old-fp"}
 
 	// A reader that would error if actually consulted — a fingerprint
 	// change against an already-known peer must never fall through to
@@ -67,13 +67,13 @@ func TestVerifyPeerKnownMismatchRefusesWithoutPrompting(t *testing.T) {
 
 func TestVerifyPeerFirstConnectAcceptRemembers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known-peers")
-	known := identity.KnownPeers{}
+	known := auth.KnownPeers{}
 
 	if err := verifyPeer(path, known, "peer:1234", "", "abc123", strings.NewReader("y\n")); err != nil {
 		t.Fatalf("verifyPeer: %v", err)
 	}
 
-	got, err := identity.LoadKnownPeers(path)
+	got, err := auth.LoadKnownPeers(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,14 +84,14 @@ func TestVerifyPeerFirstConnectAcceptRemembers(t *testing.T) {
 
 func TestVerifyPeerFirstConnectDeclineRefuses(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known-peers")
-	known := identity.KnownPeers{}
+	known := auth.KnownPeers{}
 
 	err := verifyPeer(path, known, "peer:1234", "", "abc123", strings.NewReader("n\n"))
 	if err == nil {
 		t.Fatal("expected an error for a declined first-connect prompt, got nil")
 	}
 
-	got, _ := identity.LoadKnownPeers(path)
+	got, _ := auth.LoadKnownPeers(path)
 	if len(got) != 0 {
 		t.Errorf("known-peers should be untouched after a declined prompt, got %v", got)
 	}

@@ -218,7 +218,7 @@ divergence — fetches what's missing and tells you to `checkout` +
 
 Both `import` and `reconcile` take `-peer-fingerprint <hex>` to pin a
 peer explicitly. Omit it and they fall back to a local trust-on-first-use
-store (`~/.config/9vcs/known-peers`): a genuinely new address prompts you
+store (`~/.config/9/known-peers`): a genuinely new address prompts you
 to confirm its fingerprint once; a known address is checked silently
 after that, and a fingerprint that suddenly changes is a loud refusal,
 never a silent reconnect — that's what catches a real impersonation

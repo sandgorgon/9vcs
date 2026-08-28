@@ -12,7 +12,7 @@ import (
 	p9 "github.com/sandgorgon/9p"
 	"github.com/sandgorgon/9p/client"
 
-	"github.com/sandgorgon/9vcs/identity"
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -25,22 +25,22 @@ import (
 // pinnedFingerprint, if non-empty (the caller passed -peer-fingerprint),
 // is an explicit one-off pin: the peer must present exactly that
 // fingerprint. Otherwise the connection is verified against this
-// install's known-peers store (identity.KnownPeers): a known address
+// install's known-peers store (auth.KnownPeers): a known address
 // must match its recorded fingerprint exactly, and a genuinely new
 // address triggers an interactive first-connect trust prompt on stderr —
 // PLAN.md's "known-peers store with TOFU semantics" (known_hosts
 // behavior). Either a successful pin or a successful first-connect
 // prompt is remembered in known-peers, so later calls don't need either.
 func dialPeer(pinnedFingerprint, addr string) (*client.Client, string, error) {
-	id, err := identity.Load()
+	id, err := auth.Load()
 	if err != nil {
 		return nil, "", err
 	}
-	knownPeersPath, err := identity.KnownPeersPath()
+	knownPeersPath, err := auth.KnownPeersPath()
 	if err != nil {
 		return nil, "", err
 	}
-	known, err := identity.LoadKnownPeers(knownPeersPath)
+	known, err := auth.LoadKnownPeers(knownPeersPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -88,12 +88,12 @@ func dialPeer(pinnedFingerprint, addr string) (*client.Client, string, error) {
 // pin or an existing known-peers entry is always a refusal, never a
 // prompt: a changed fingerprint for an address already vouched for is
 // exactly what TOFU exists to catch loudly, not paper over.
-func verifyPeer(knownPeersPath string, known identity.KnownPeers, addr, pinned, presented string, prompt io.Reader) error {
+func verifyPeer(knownPeersPath string, known auth.KnownPeers, addr, pinned, presented string, prompt io.Reader) error {
 	if pinned != "" {
 		if presented != pinned {
 			return fmt.Errorf("peer %s presented fingerprint %s, not the pinned %s", addr, presented, pinned)
 		}
-		return identity.RememberPeer(knownPeersPath, addr, presented)
+		return auth.RememberPeer(knownPeersPath, addr, presented)
 	}
 	if fp, ok := known[addr]; ok {
 		if presented != fp {
@@ -108,7 +108,7 @@ func verifyPeer(knownPeersPath string, known identity.KnownPeers, addr, pinned, 
 	if !trust {
 		return fmt.Errorf("connection to %s declined: fingerprint %s not trusted", addr, presented)
 	}
-	return identity.RememberPeer(knownPeersPath, addr, presented)
+	return auth.RememberPeer(knownPeersPath, addr, presented)
 }
 
 // promptTrustPeer is the "first-connect prompt" PLAN.md's TOFU decision
@@ -300,7 +300,7 @@ func importClosure(c *client.Client, store *patches.Store, blobs *patches.BlobSt
 		switch {
 		case p.AuthorFingerprint == ([32]byte{}):
 			stats.Unsigned++
-		case identity.Fingerprint(ed25519.PublicKey(p.AuthorFingerprint[:])) == peerFingerprint:
+		case auth.Fingerprint(ed25519.PublicKey(p.AuthorFingerprint[:])) == peerFingerprint:
 			stats.AuthoredByPeer++
 		default:
 			stats.Relayed++

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
-	"github.com/sandgorgon/9vcs/identity"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
@@ -54,7 +54,7 @@ func cmdBundleExport(args []string) error {
 		roots = append(roots, h)
 	}
 
-	id, err := identity.Load()
+	id, err := auth.Load()
 	if err != nil {
 		return fmt.Errorf("bundle export: loading identity: %w", err)
 	}
@@ -132,7 +132,7 @@ func loadBundleFile(path string) (*bundle.Bundle, error) {
 }
 
 func printBundleSummary(b *bundle.Bundle) {
-	fmt.Printf("signer: %s\n", identity.Fingerprint(b.SignerPub))
+	fmt.Printf("signer: %s\n", auth.Fingerprint(b.SignerPub))
 	if b.Message != "" {
 		fmt.Printf("message: %s\n", b.Message)
 	}
