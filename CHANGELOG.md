@@ -7,6 +7,27 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.3] - 2026-08-28
+
+### Added
+
+- `9vcs version`, and the running version printed in `9vcs help`'s
+  usage line.
+
+### Changed
+
+- Identity, fingerprinting, TLS config, and known-peers/authorized-
+  peers handling moved out of 9vcs's own `identity/` package into the
+  shared, zero-dependency [`github.com/sandgorgon/9auth`](https://github.com/sandgorgon/9auth)
+  module (v0.1.0) — one identity, one trust decision, shared with
+  other 9-family programs instead of a copy per project. The
+  identity/known-peers directory moves from `~/.config/9vcs` to
+  `~/.config/9`; an existing install's identity is copied forward
+  automatically on first use, preserving its fingerprint (and every
+  peer's existing pin of it). `user.name`/`user.email` config still
+  lives at `~/.config/9vcs/config`, unaffected by this move. No user-
+  facing command or permission-model changes.
+
 ## [0.1.2] - 2026-08-25
 
 ### Added
