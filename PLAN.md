@@ -2255,6 +2255,42 @@ used to say:
   that file is 9vcs-specific preference data with no migration story.
   `go.mod` now requires `github.com/sandgorgon/9auth` alongside `9p`; no
   `replace` directive needed, `9auth` shipped a real tag.
+- Working-tree-diff orchestration extracted to a library (2026-08-29,
+  closes #26): `github.com/sandgorgon/9vcs/repo` is a new importable
+  package — surfaced by the `9ed` editor project needing to open a repo,
+  resolve a ref to a `patches.Index`, and compute a working-tree diff
+  without shelling out to the `9vcs` binary and parsing its text output.
+  Pure refactor, no CLI behavior change: `cmd/9vcs/repo.go` and the
+  working-tree/ignore-matching logic in `cmd/9vcs/workingtree.go` and
+  `cmd/9vcs/ignore.go` moved wholesale, with names exported (`repo.Repo`,
+  `repo.Find`/`repo.Open`, `repo.ChangedFiles`, `repo.WriteWorkingTree`,
+  `repo.SplitLines`/`JoinLines`, ref/HEAD/merge-state methods on `*Repo`,
+  etc.); `cmd/9vcs` is now a thin consumer, importing `repo` the same way
+  an external caller would. CLI-only bits (`author`/`signPatch`, which
+  need `9vcs config` resolution and `9auth` signing) stayed behind in
+  `cmd/9vcs`. One simplification fell out for free: renaming
+  `setRefHashCAS` to `SetRefHash` made its signature match
+  `vcsfs.RefWriter` exactly, so `*repo.Repo` now satisfies
+  `vcsfs.RefReader`/`RefWriter` directly — the `refAdapter` wrapper type
+  `cmd/9vcs/serve.go` used to need is gone, `vcsfs.FS{Refs: r}` just
+  takes the repo value itself. Verified: `go build`/`go vet`/`go test
+  -race ./...` all clean across every package, no skips. Verified live
+  with the real binary, not just `go test`: init/record/log/status/
+  branch/checkout -b/diff all produce identical output to before the
+  refactor; a real three-way-observable merge conflict (two branches
+  editing the same line) produced correct conflict markers, `status`
+  showed `U`, and resolving + recording produced a clean merge commit
+  with both dependencies listed. Also verified over real TLS+9P between
+  two distinct identities (not just local): peer A `import`s peer B's
+  signed history (exercising `RefReader.RefHash` and `fetchPatch`'s
+  signature check over the wire against a `*repo.Repo`-backed `vcsfs.FS`
+  with no adapter in front of it), and a `reconcile` push from A lands
+  correctly on B (exercising the CAS `SetRefHash` write path both ways:
+  refused when the target is B's own checked-out branch, and succeeding
+  once B has a different branch checked out) — B's `log` shows A's patch,
+  signature verified. Unblocks the companion "selective (partial) record,
+  keyed by line identity" spec (#25), which depends on this library
+  boundary existing.
 
 ## Open items to revisit
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdDiff(args []string) error {
@@ -11,7 +12,7 @@ func cmdDiff(args []string) error {
 		return fmt.Errorf("diff: too many arguments (expected [<ref>] or [<ref> <ref>])")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -22,12 +23,12 @@ func cmdDiff(args []string) error {
 
 	var base patches.Hash
 	if len(args) == 1 {
-		base, err = r.resolveRef(args[0])
+		base, err = r.ResolveRef(args[0])
 		if err != nil {
 			return fmt.Errorf("diff: %w", err)
 		}
 	} else {
-		base, _, err = r.headHash()
+		base, _, err = r.HeadHash()
 		if err != nil {
 			return fmt.Errorf("reading head: %w", err)
 		}
@@ -37,12 +38,12 @@ func cmdDiff(args []string) error {
 
 // diffWorkingTree prints the difference between the materialized state at
 // base and the actual working-tree files — the uncommitted-changes view.
-func diffWorkingTree(r *repo, base patches.Hash) error {
-	idx, err := r.materialize(base)
+func diffWorkingTree(r *repo.Repo, base patches.Hash) error {
+	idx, err := r.Materialize(base)
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
 	}
-	changes, err := changedFiles(r, idx)
+	changes, err := repo.ChangedFiles(r, idx)
 	if err != nil {
 		return err
 	}
@@ -52,27 +53,27 @@ func diffWorkingTree(r *repo, base patches.Hash) error {
 
 // renderChanges is diffWorkingTree and diffRefs' shared tail.
 func renderChanges(base patches.Index, changes map[string]patches.FileChange) {
-	for _, p := range sortedPaths(changes) {
+	for _, p := range repo.SortedPaths(changes) {
 		renderDiff(p, base[p], changes[p])
 	}
 }
 
 // diffRefs prints the difference between two materialized points in
 // history directly, without involving the working tree at all.
-func diffRefs(r *repo, a, b string) error {
-	ha, err := r.resolveRef(a)
+func diffRefs(r *repo.Repo, a, b string) error {
+	ha, err := r.ResolveRef(a)
 	if err != nil {
 		return fmt.Errorf("diff: %w", err)
 	}
-	hb, err := r.resolveRef(b)
+	hb, err := r.ResolveRef(b)
 	if err != nil {
 		return fmt.Errorf("diff: %w", err)
 	}
-	idxA, err := r.materialize(ha)
+	idxA, err := r.Materialize(ha)
 	if err != nil {
 		return fmt.Errorf("replaying %s: %w", a, err)
 	}
-	idxB, err := r.materialize(hb)
+	idxB, err := r.Materialize(hb)
 	if err != nil {
 		return fmt.Errorf("replaying %s: %w", b, err)
 	}

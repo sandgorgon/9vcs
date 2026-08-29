@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdRecord(args []string) error {
@@ -20,12 +21,12 @@ func cmdRecord(args []string) error {
 		return fmt.Errorf("record: -m MESSAGE is required")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
 
-	branch, err := r.currentBranch()
+	branch, err := r.CurrentBranch()
 	if err != nil {
 		return fmt.Errorf("reading HEAD: %w", err)
 	}
@@ -33,11 +34,11 @@ func cmdRecord(args []string) error {
 		return fmt.Errorf("record: HEAD is detached; check out a branch first")
 	}
 
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
-	mergeHeads, err := r.mergeHeads()
+	mergeHeads, err := r.MergeHeads()
 	if err != nil {
 		return fmt.Errorf("reading merge state: %w", err)
 	}
@@ -46,12 +47,12 @@ func cmdRecord(args []string) error {
 		// Remove merge's comparison sidecars before diffing the working
 		// tree — they're tooling, not content, and must never end up
 		// picked up as a newly-tracked file in the merge's own patch.
-		sidecars, err := r.mergeSidecars()
+		sidecars, err := r.MergeSidecars()
 		if err != nil {
 			return fmt.Errorf("reading merge state: %w", err)
 		}
 		for _, s := range sidecars {
-			if err := removeSidecarFile(r, s); err != nil && !os.IsNotExist(err) {
+			if err := repo.RemoveSidecarFile(r, s); err != nil && !os.IsNotExist(err) {
 				return fmt.Errorf("removing %s: %w", s, err)
 			}
 		}
@@ -67,13 +68,13 @@ func cmdRecord(args []string) error {
 		// disk for that path, corrupting line identity on the next edit.
 		base, mergeConflicts, err = computeMerge(r, append([]patches.Hash{head}, mergeHeads...)...)
 	} else {
-		base, err = r.materialize(head)
+		base, err = r.Materialize(head)
 	}
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
 	}
 
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		return err
 	}
@@ -86,7 +87,7 @@ func cmdRecord(args []string) error {
 	// for why, and for a real order-dependent bug found and fixed the
 	// same day this comment was last touched.
 	//
-	// Reads go through an os.Root confined to r.root, not a plain
+	// Reads go through an os.Root confined to r.Root, not a plain
 	// filepath.Join + bare os.* call — same reasoning as
 	// writeWorkingTree's rewrite (see its doc comment): c.Path is
 	// already a validated string (no ".."), but what it actually
@@ -96,7 +97,7 @@ func cmdRecord(args []string) error {
 	// codebase that reads working-tree content by path outside
 	// changedFiles (which is safe by construction — see
 	// workingtree.go's changedFiles doc comment).
-	workRoot, err := os.OpenRoot(r.root)
+	workRoot, err := os.OpenRoot(r.Root)
 	if err != nil {
 		return fmt.Errorf("opening working tree root: %w", err)
 	}
@@ -127,8 +128,8 @@ func cmdRecord(args []string) error {
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", c.Path, err)
 		}
-		if isBinary(content) {
-			hash, err := r.blobs.Put(content)
+		if repo.IsBinary(content) {
+			hash, err := r.Blobs.Put(content)
 			if err != nil {
 				return fmt.Errorf("storing blob for %s: %w", c.Path, err)
 			}
@@ -136,7 +137,7 @@ func cmdRecord(args []string) error {
 			continue
 		}
 		ops := modifyDeleteKeptTextOps(base, c.Path, content)
-		changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindText, Ops: ops, TrailingNewline: hasTrailingNewline(content), Executable: executable}
+		changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindText, Ops: ops, TrailingNewline: repo.HasTrailingNewline(content), Executable: executable}
 	}
 
 	if len(changes) == 0 && !midMerge {
@@ -172,18 +173,18 @@ func cmdRecord(args []string) error {
 	}
 	signPatch(patch)
 
-	hash, err := r.store.Put(patch)
+	hash, err := r.Store.Put(patch)
 	if err != nil {
 		return fmt.Errorf("writing patch: %w", err)
 	}
-	if err := r.setLocalRefCAS(branch, head, hash); err != nil {
+	if err := r.SetLocalRefCAS(branch, head, hash); err != nil {
 		return fmt.Errorf("updating ref: %w", err)
 	}
 	if midMerge {
-		if err := r.clearMergeHeads(); err != nil {
+		if err := r.ClearMergeHeads(); err != nil {
 			return fmt.Errorf("clearing merge state: %w", err)
 		}
-		if err := r.clearMergeSidecars(); err != nil {
+		if err := r.ClearMergeSidecars(); err != nil {
 			return fmt.Errorf("clearing merge state: %w", err)
 		}
 	}
@@ -232,7 +233,7 @@ func cmdRecord(args []string) error {
 // overwrites, not additive graph operations, so they were never
 // susceptible to this in the first place.
 func modifyDeleteKeptTextOps(base patches.Index, path string, content []byte) []patches.LineOp {
-	ops, _ := patches.Diff(nil, splitLines(string(content)))
+	ops, _ := patches.Diff(nil, repo.SplitLines(string(content)))
 	prior, ok := base[path]
 	if !ok || prior.Kind != patches.KindText || prior.Graph == nil {
 		return ops

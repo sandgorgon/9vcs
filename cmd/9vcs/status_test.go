@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func TestStatusLabel(t *testing.T) {
@@ -58,21 +59,21 @@ func TestStatusReportsAddedModifiedDeletedAndSkipsIgnored(t *testing.T) {
 
 	writeWorkingFile(t, r, "keep.txt", "edited")
 	writeWorkingFile(t, r, "new.txt", "brand new")
-	writeIgnoreFile(t, r.root, "*.log\n")
+	writeIgnoreFile(t, r.Root, "*.log\n")
 	writeWorkingFile(t, r, "noise.log", "should never show up")
-	if err := os.Remove(filepath.Join(r.root, "gone.txt")); err != nil {
+	if err := os.Remove(filepath.Join(r.Root, "gone.txt")); err != nil {
 		t.Fatal(err)
 	}
 
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := r.materialize(head)
+	base, err := r.Materialize(head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,10 +82,10 @@ func TestStatusReportsAddedModifiedDeletedAndSkipsIgnored(t *testing.T) {
 		"keep.txt":     "M",
 		"new.txt":      "A",
 		"gone.txt":     "D",
-		ignoreFileName: "A", // .9vcsignore itself is newly recorded here, and correctly not exempt from its own rules
+		repo.IgnoreFileName: "A", // .9vcsignore itself is newly recorded here, and correctly not exempt from its own rules
 	}
 	if len(changes) != len(want) {
-		t.Fatalf("changedFiles = %v, want exactly %v (noise.log must be excluded)", sortedPaths(changes), want)
+		t.Fatalf("ChangedFiles = %v, want exactly %v (noise.log must be excluded)", repo.SortedPaths(changes), want)
 	}
 	for p, wantLabel := range want {
 		fc, ok := changes[p]

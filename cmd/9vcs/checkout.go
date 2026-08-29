@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdCheckout(args []string) error {
@@ -26,22 +27,22 @@ func cmdCheckout(args []string) error {
 	}
 	name := rest[0]
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
 
-	oldHead, _, err := r.headHash()
+	oldHead, _, err := r.HeadHash()
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
 
 	// Refuse to clobber uncommitted work, same as git's real checkout safety check.
-	base, err := r.materialize(oldHead)
+	base, err := r.Materialize(oldHead)
 	if err != nil {
 		return fmt.Errorf("replaying current history: %w", err)
 	}
-	dirty, err := changedFiles(r, base)
+	dirty, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		return err
 	}
@@ -55,51 +56,51 @@ func cmdCheckout(args []string) error {
 	)
 	switch {
 	case *create:
-		if _, ok, err := r.refHash(name); err != nil {
+		if _, ok, err := r.RefHash(name); err != nil {
 			return err
 		} else if ok {
 			return fmt.Errorf("branch %q already exists", name)
 		}
 		start := oldHead
 		if len(rest) == 2 {
-			start, err = r.resolveRef(rest[1])
+			start, err = r.ResolveRef(rest[1])
 			if err != nil {
 				return fmt.Errorf("checkout -b: %w", err)
 			}
 		}
-		if err := r.setLocalRefCAS(name, patches.Hash{}, start); err != nil {
+		if err := r.SetLocalRefCAS(name, patches.Hash{}, start); err != nil {
 			return err
 		}
 		targetHash, branch = start, name
 	default:
-		if h, ok, err := r.refHash(name); err != nil {
+		if h, ok, err := r.RefHash(name); err != nil {
 			return err
 		} else if ok {
 			targetHash, branch = h, name
 			break
 		}
-		h, err := r.store.ResolvePrefix(name)
+		h, err := r.Store.ResolvePrefix(name)
 		if err != nil {
 			return fmt.Errorf("checkout: unknown branch or patch %q", name)
 		}
 		targetHash, branch = h, ""
 	}
 
-	target, err := r.materialize(targetHash)
+	target, err := r.Materialize(targetHash)
 	if err != nil {
 		return fmt.Errorf("replaying target history: %w", err)
 	}
-	if err := writeWorkingTree(r, base, target); err != nil {
+	if err := repo.WriteWorkingTree(r, base, target); err != nil {
 		return fmt.Errorf("writing working tree: %w", err)
 	}
 
 	if branch != "" {
-		if err := r.setHeadBranch(branch); err != nil {
+		if err := r.SetHeadBranch(branch); err != nil {
 			return err
 		}
 		fmt.Printf("switched to branch %s\n", branch)
 	} else {
-		if err := r.setHeadDetached(targetHash); err != nil {
+		if err := r.SetHeadDetached(targetHash); err != nil {
 			return err
 		}
 		fmt.Printf("checked out %s (detached)\n", targetHash.String()[:12])

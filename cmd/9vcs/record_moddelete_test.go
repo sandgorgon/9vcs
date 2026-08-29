@@ -48,7 +48,7 @@ func TestModifyDeleteKeptTextOpsIsOrderIndependent(t *testing.T) {
 		// between them, actually differ from one iteration to the next.
 		baseLines, _ := patches.Linearize(baseIdx["f.txt"].Graph)
 		oursOps, _ := patches.Diff(baseLines, modified)
-		oursHash, err := r.store.Put(&patches.Patch{
+		oursHash, err := r.Store.Put(&patches.Patch{
 			Dependencies: []patches.Hash{baseHash},
 			Message:      fmt.Sprintf("ours modifies %d", salt),
 			Changes:      []patches.FileChange{{Path: "f.txt", Kind: patches.KindText, TrailingNewline: true, Ops: oursOps}},
@@ -56,7 +56,7 @@ func TestModifyDeleteKeptTextOpsIsOrderIndependent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		theirsHash, err := r.store.Put(&patches.Patch{
+		theirsHash, err := r.Store.Put(&patches.Patch{
 			Dependencies: []patches.Hash{baseHash},
 			Message:      fmt.Sprintf("theirs deletes %d", salt),
 			Changes:      []patches.FileChange{{Path: "f.txt", Kind: patches.KindDelete}},
@@ -106,12 +106,12 @@ func TestModifyDeleteKeptTextOpsIsOrderIndependent(t *testing.T) {
 			Message:      "finalize modify/delete",
 			Changes:      []patches.FileChange{{Path: "f.txt", Kind: patches.KindText, TrailingNewline: true, Ops: ops}},
 		}
-		mergeHash, err := r.store.Put(mergePatch)
+		mergeHash, err := r.Store.Put(mergePatch)
 		if err != nil {
 			t.Fatalf("salt %d: %v", salt, err)
 		}
 
-		idx, err := patches.Materialize(r.store, mergeHash)
+		idx, err := patches.Materialize(r.Store, mergeHash)
 		if err != nil {
 			t.Fatalf("salt %d: %v", salt, err)
 		}

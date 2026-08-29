@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdMerge(args []string) error {
@@ -21,7 +22,7 @@ func cmdMerge(args []string) error {
 		if len(rest) != 0 {
 			return fmt.Errorf("merge -abort: no other arguments expected")
 		}
-		r, err := findRepo()
+		r, err := repo.Find()
 		if err != nil {
 			return err
 		}
@@ -32,18 +33,18 @@ func cmdMerge(args []string) error {
 		return fmt.Errorf("merge: expected exactly one branch name or patch hash")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
 
-	if heads, err := r.mergeHeads(); err != nil {
+	if heads, err := r.MergeHeads(); err != nil {
 		return err
 	} else if len(heads) > 0 {
 		return fmt.Errorf("merge: a merge is already in progress; resolve conflicts and run record, or `9vcs merge -abort` to abandon it")
 	}
 
-	branch, err := r.currentBranch()
+	branch, err := r.CurrentBranch()
 	if err != nil {
 		return fmt.Errorf("reading HEAD: %w", err)
 	}
@@ -51,11 +52,11 @@ func cmdMerge(args []string) error {
 		return fmt.Errorf("merge: HEAD is detached; check out a branch first")
 	}
 
-	ours, _, err := r.headHash()
+	ours, _, err := r.HeadHash()
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
-	theirs, err := r.resolveRef(rest[0])
+	theirs, err := r.ResolveRef(rest[0])
 	if err != nil {
 		return fmt.Errorf("merge: %w", err)
 	}
@@ -64,7 +65,7 @@ func cmdMerge(args []string) error {
 		return nil
 	}
 
-	oursClosure, err := patches.Closure(r.store, ours)
+	oursClosure, err := patches.Closure(r.Store, ours)
 	if err != nil {
 		return fmt.Errorf("replaying current history: %w", err)
 	}
@@ -73,11 +74,11 @@ func cmdMerge(args []string) error {
 		return nil
 	}
 
-	oursIdx, err := r.materialize(ours)
+	oursIdx, err := r.Materialize(ours)
 	if err != nil {
 		return fmt.Errorf("replaying current history: %w", err)
 	}
-	dirty, err := changedFiles(r, oursIdx)
+	dirty, err := repo.ChangedFiles(r, oursIdx)
 	if err != nil {
 		return err
 	}
@@ -85,20 +86,20 @@ func cmdMerge(args []string) error {
 		return fmt.Errorf("merge: uncommitted changes would be overwritten; record or discard them first")
 	}
 
-	theirsClosure, err := patches.Closure(r.store, theirs)
+	theirsClosure, err := patches.Closure(r.Store, theirs)
 	if err != nil {
 		return fmt.Errorf("replaying %s: %w", rest[0], err)
 	}
 	if theirsClosure[ours] {
 		// Fast-forward: our own history is already a prefix of theirs.
-		theirsIdx, err := r.materialize(theirs)
+		theirsIdx, err := r.Materialize(theirs)
 		if err != nil {
 			return fmt.Errorf("replaying %s: %w", rest[0], err)
 		}
-		if err := writeWorkingTree(r, oursIdx, theirsIdx); err != nil {
+		if err := repo.WriteWorkingTree(r, oursIdx, theirsIdx); err != nil {
 			return fmt.Errorf("writing working tree: %w", err)
 		}
-		if err := r.setLocalRefCAS(branch, ours, theirs); err != nil {
+		if err := r.SetLocalRefCAS(branch, ours, theirs); err != nil {
 			return err
 		}
 		fmt.Printf("fast-forwarded %s to %s\n", branch, theirs.String()[:12])
@@ -121,29 +122,29 @@ func cmdMerge(args []string) error {
 			continue
 		}
 		if theirsIdx == nil {
-			theirsIdx, err = r.materialize(theirs)
+			theirsIdx, err = r.Materialize(theirs)
 			if err != nil {
 				return fmt.Errorf("replaying %s: %w", rest[0], err)
 			}
 		}
-		data, err := r.blobs.Get(theirsIdx[c.Path].Blob)
+		data, err := r.Blobs.Get(theirsIdx[c.Path].Blob)
 		if err != nil {
 			return fmt.Errorf("reading blob for %s: %w", c.Path, err)
 		}
-		sidecar := binaryConflictSidecar(c.Path, theirs)
-		if err := writeSidecarFile(r, sidecar, data); err != nil {
+		sidecar := repo.BinaryConflictSidecar(c.Path, theirs)
+		if err := repo.WriteSidecarFile(r, sidecar, data); err != nil {
 			return fmt.Errorf("writing %s: %w", sidecar, err)
 		}
 		sidecars = append(sidecars, sidecar)
 	}
 
-	if err := writeWorkingTree(r, oursIdx, merged); err != nil {
+	if err := repo.WriteWorkingTree(r, oursIdx, merged); err != nil {
 		return fmt.Errorf("writing working tree: %w", err)
 	}
-	if err := r.setMergeHeads([]patches.Hash{theirs}); err != nil {
+	if err := r.SetMergeHeads([]patches.Hash{theirs}); err != nil {
 		return fmt.Errorf("recording merge state: %w", err)
 	}
-	if err := r.setMergeSidecars(sidecars); err != nil {
+	if err := r.SetMergeSidecars(sidecars); err != nil {
 		return fmt.Errorf("recording merge state: %w", err)
 	}
 
@@ -157,7 +158,7 @@ func cmdMerge(args []string) error {
 		case "text":
 			fmt.Printf("  CONFLICT (text): %s — resolve the <<<<<<< / ======= / >>>>>>> markers in the file, then record\n", c.Path)
 		case "binary":
-			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", c.Path, binaryConflictSidecar(c.Path, theirs))
+			fmt.Printf("  CONFLICT (binary): %s — kept your version; theirs is at %s for comparison\n", c.Path, repo.BinaryConflictSidecar(c.Path, theirs))
 		case "modify/delete":
 			fmt.Printf("  CONFLICT (modify/delete): %s — deleted by %s, modified by the other side; kept the modified version\n", c.Path, c.DeletedBy)
 		case "symlink":
@@ -188,8 +189,8 @@ func cmdMerge(args []string) error {
 // Like `git merge --abort`, this discards any hand-editing done to
 // resolve conflicts since the merge started — there's no partial-save;
 // it's a full return to head, not a selective undo.
-func cmdMergeAbort(r *repo) error {
-	heads, err := r.mergeHeads()
+func cmdMergeAbort(r *repo.Repo) error {
+	heads, err := r.MergeHeads()
 	if err != nil {
 		return fmt.Errorf("merge -abort: %w", err)
 	}
@@ -197,11 +198,11 @@ func cmdMergeAbort(r *repo) error {
 		return fmt.Errorf("merge -abort: no merge in progress")
 	}
 
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
-	headIdx, err := r.materialize(head)
+	headIdx, err := r.Materialize(head)
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
 	}
@@ -209,24 +210,24 @@ func cmdMergeAbort(r *repo) error {
 	if err != nil {
 		return fmt.Errorf("merge -abort: %w", err)
 	}
-	if err := writeWorkingTree(r, merged, headIdx); err != nil {
+	if err := repo.WriteWorkingTree(r, merged, headIdx); err != nil {
 		return fmt.Errorf("merge -abort: restoring working tree: %w", err)
 	}
 
-	sidecars, err := r.mergeSidecars()
+	sidecars, err := r.MergeSidecars()
 	if err != nil {
 		return fmt.Errorf("merge -abort: %w", err)
 	}
 	for _, s := range sidecars {
-		if err := removeSidecarFile(r, s); err != nil && !os.IsNotExist(err) {
+		if err := repo.RemoveSidecarFile(r, s); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("merge -abort: removing %s: %w", s, err)
 		}
 	}
 
-	if err := r.clearMergeHeads(); err != nil {
+	if err := r.ClearMergeHeads(); err != nil {
 		return fmt.Errorf("merge -abort: %w", err)
 	}
-	if err := r.clearMergeSidecars(); err != nil {
+	if err := r.ClearMergeSidecars(); err != nil {
 		return fmt.Errorf("merge -abort: %w", err)
 	}
 

@@ -7,22 +7,23 @@ import (
 	"time"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // recordForTest is a minimal stand-in for cmdRecord's core: diff the
 // working tree against head, store a patch for whatever changed, move the
 // branch ref. No merge/conflict handling — these tests never need it.
-func recordForTest(t *testing.T, r *repo, msg string) patches.Hash {
+func recordForTest(t *testing.T, r *repo.Repo, msg string) patches.Hash {
 	t.Helper()
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := r.materialize(head)
+	base, err := r.Materialize(head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,23 +35,23 @@ func recordForTest(t *testing.T, r *repo, msg string) patches.Hash {
 	for _, fc := range changes {
 		patch.Changes = append(patch.Changes, fc)
 	}
-	hash, err := r.store.Put(patch)
+	hash, err := r.Store.Put(patch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	branch, err := r.currentBranch()
+	branch, err := r.CurrentBranch()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setLocalRefCAS(branch, head, hash); err != nil {
+	if err := r.SetLocalRefCAS(branch, head, hash); err != nil {
 		t.Fatal(err)
 	}
 	return hash
 }
 
-func writeWorkingFile(t *testing.T, r *repo, path, content string) {
+func writeWorkingFile(t *testing.T, r *repo.Repo, path, content string) {
 	t.Helper()
-	full := filepath.Join(r.root, filepath.FromSlash(path))
+	full := filepath.Join(r.Root, filepath.FromSlash(path))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -65,15 +66,15 @@ func writeWorkingFile(t *testing.T, r *repo, path, content string) {
 // any blob is stored, never even touches r.blobs for a binary file).
 func TestChangedFilesSkipsNewIgnoredFile(t *testing.T) {
 	r := newTestRepo(t)
-	writeIgnoreFile(t, r.root, "*.log\n")
+	writeIgnoreFile(t, r.Root, "*.log\n")
 	writeWorkingFile(t, r, "debug.log", "noisy output")
 	writeWorkingFile(t, r, "main.go", "package main")
 
-	base, err := r.materialize(patches.Hash{})
+	base, err := r.Materialize(patches.Hash{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,17 +96,17 @@ func TestChangedFilesNeverDropsAlreadyTrackedFile(t *testing.T) {
 	recordForTest(t, r, "add tracked.log")
 
 	// Only now does .9vcsignore start matching it.
-	writeIgnoreFile(t, r.root, "*.log\n")
+	writeIgnoreFile(t, r.Root, "*.log\n")
 
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := r.materialize(head)
+	base, err := r.Materialize(head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +117,7 @@ func TestChangedFilesNeverDropsAlreadyTrackedFile(t *testing.T) {
 	// Actually modify it, and it must still be picked up as a real edit —
 	// not silently ignored just because it now matches a pattern.
 	writeWorkingFile(t, r, "tracked.log", "an actual edit")
-	changes, err = changedFiles(r, base)
+	changes, err = repo.ChangedFiles(r, base)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,22 +7,23 @@ import (
 	"testing"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // newTestRepo sets up a bare repo the way cmdInit does, without going
 // through the CLI (no os.Chdir, no argument parsing) — just enough state
 // for repo-method tests.
-func newTestRepo(t *testing.T) *repo {
+func newTestRepo(t *testing.T) *repo.Repo {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, dotDir, "refs"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, repo.DotDir, "refs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r, err := openRepo(root)
+	r, err := repo.Open(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setHeadBranch(defaultBranch); err != nil {
+	if err := r.SetHeadBranch(repo.DefaultBranch); err != nil {
 		t.Fatal(err)
 	}
 	return r
@@ -30,59 +31,59 @@ func newTestRepo(t *testing.T) *repo {
 
 func TestSetRefHashCASRefusesCheckedOutBranch(t *testing.T) {
 	r := newTestRepo(t)
-	h, err := r.store.Put(&patches.Patch{Message: "x"})
+	h, err := r.Store.Put(&patches.Patch{Message: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// defaultBranch ("main") is checked out from newTestRepo's setup.
-	err = r.setRefHashCAS(defaultBranch, patches.Hash{}, h)
+	// repo.DefaultBranch ("main") is checked out from newTestRepo's setup.
+	err = r.SetRefHash(repo.DefaultBranch, patches.Hash{}, h)
 	if err == nil {
-		t.Fatal("expected setRefHashCAS to refuse updating the checked-out branch, got nil")
+		t.Fatal("expected SetRefHash to refuse updating the checked-out branch, got nil")
 	}
 	if !strings.Contains(err.Error(), "checked out") {
 		t.Errorf("error doesn't mention the checked-out branch: %v", err)
 	}
-	if _, exists, _ := r.refHash(defaultBranch); exists {
+	if _, exists, _ := r.RefHash(repo.DefaultBranch); exists {
 		t.Error("ref should not have been created despite the refusal")
 	}
 
 	// A different branch name is unaffected by the check.
-	if err := r.setRefHashCAS("other", patches.Hash{}, h); err != nil {
-		t.Fatalf("setRefHashCAS on a non-checked-out branch: %v", err)
+	if err := r.SetRefHash("other", patches.Hash{}, h); err != nil {
+		t.Fatalf("SetRefHash on a non-checked-out branch: %v", err)
 	}
-	if got, exists, _ := r.refHash("other"); !exists || got != h {
+	if got, exists, _ := r.RefHash("other"); !exists || got != h {
 		t.Errorf("refs[other] = %v, %v, want %s, true", got, exists, h)
 	}
 }
 
 func TestSetRefHashCASConflict(t *testing.T) {
 	r := newTestRepo(t)
-	oldHash, err := r.store.Put(&patches.Patch{Message: "old"})
+	oldHash, err := r.Store.Put(&patches.Patch{Message: "old"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	newHash, err := r.store.Put(&patches.Patch{Message: "new"})
+	newHash, err := r.Store.Put(&patches.Patch{Message: "new"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setRefHashCAS("feature", patches.Hash{}, oldHash); err != nil {
+	if err := r.SetRefHash("feature", patches.Hash{}, oldHash); err != nil {
 		t.Fatal(err)
 	}
 
 	// Stale expected-old: must fail, must not change the ref.
-	if err := r.setRefHashCAS("feature", newHash /* wrong */, newHash); err == nil {
+	if err := r.SetRefHash("feature", newHash /* wrong */, newHash); err == nil {
 		t.Error("expected a CAS conflict for a stale expected-old, got nil")
 	}
-	if got, _, _ := r.refHash("feature"); got != oldHash {
+	if got, _, _ := r.RefHash("feature"); got != oldHash {
 		t.Errorf("ref changed despite a rejected CAS write: got %s, want unchanged %s", got, oldHash)
 	}
 
 	// Correct expected-old: must succeed.
-	if err := r.setRefHashCAS("feature", oldHash, newHash); err != nil {
-		t.Fatalf("setRefHashCAS with the correct expected-old: %v", err)
+	if err := r.SetRefHash("feature", oldHash, newHash); err != nil {
+		t.Fatalf("SetRefHash with the correct expected-old: %v", err)
 	}
-	if got, _, _ := r.refHash("feature"); got != newHash {
+	if got, _, _ := r.RefHash("feature"); got != newHash {
 		t.Errorf("refs[feature] = %s, want %s", got, newHash)
 	}
 }
@@ -90,28 +91,28 @@ func TestSetRefHashCASConflict(t *testing.T) {
 func TestMergeHeadsRoundTrip(t *testing.T) {
 	r := newTestRepo(t)
 
-	if heads, err := r.mergeHeads(); err != nil || len(heads) != 0 {
-		t.Fatalf("mergeHeads() on a fresh repo = %v, %v, want empty, nil", heads, err)
+	if heads, err := r.MergeHeads(); err != nil || len(heads) != 0 {
+		t.Fatalf("MergeHeads() on a fresh repo = %v, %v, want empty, nil", heads, err)
 	}
 
-	a, err := r.store.Put(&patches.Patch{Message: "a"})
+	a, err := r.Store.Put(&patches.Patch{Message: "a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := r.store.Put(&patches.Patch{Message: "b"})
+	b, err := r.Store.Put(&patches.Patch{Message: "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := r.store.Put(&patches.Patch{Message: "c"})
+	c, err := r.Store.Put(&patches.Patch{Message: "c"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []patches.Hash{a, b, c}
-	if err := r.setMergeHeads(want); err != nil {
+	if err := r.SetMergeHeads(want); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := r.mergeHeads()
+	got, err := r.MergeHeads()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,11 +125,11 @@ func TestMergeHeadsRoundTrip(t *testing.T) {
 		}
 	}
 
-	if err := r.clearMergeHeads(); err != nil {
+	if err := r.ClearMergeHeads(); err != nil {
 		t.Fatal(err)
 	}
-	if heads, err := r.mergeHeads(); err != nil || len(heads) != 0 {
-		t.Fatalf("mergeHeads() after clearMergeHeads = %v, %v, want empty, nil", heads, err)
+	if heads, err := r.MergeHeads(); err != nil || len(heads) != 0 {
+		t.Fatalf("MergeHeads() after ClearMergeHeads = %v, %v, want empty, nil", heads, err)
 	}
 }
 
@@ -143,21 +144,21 @@ func TestMergeHeadsRoundTrip(t *testing.T) {
 func TestSetMergeHeadsAndSidecarsWriteAtomically(t *testing.T) {
 	r := newTestRepo(t)
 
-	a, err := r.store.Put(&patches.Patch{Message: "a"})
+	a, err := r.Store.Put(&patches.Patch{Message: "a"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setMergeHeads([]patches.Hash{a}); err != nil {
+	if err := r.SetMergeHeads([]patches.Hash{a}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(r.mergeHeadFile() + ".tmp"); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(r.Dir, "MERGE_HEAD") + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("expected no leftover MERGE_HEAD.tmp, stat err = %v", err)
 	}
 
-	if err := r.setMergeSidecars([]string{"logo.png.abcdef123456"}); err != nil {
+	if err := r.SetMergeSidecars([]string{"logo.png.abcdef123456"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(r.mergeSidecarsFile() + ".tmp"); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(r.Dir, "MERGE_SIDECARS") + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("expected no leftover MERGE_SIDECARS.tmp, stat err = %v", err)
 	}
 }
@@ -168,10 +169,10 @@ func TestSetRefHashCASRejectsUnknownPatch(t *testing.T) {
 	for i := range unknown {
 		unknown[i] = 0xAB
 	}
-	if err := r.setRefHashCAS("feature", patches.Hash{}, unknown); err == nil {
-		t.Error("expected setRefHashCAS to reject a hash not present in the store, got nil")
+	if err := r.SetRefHash("feature", patches.Hash{}, unknown); err == nil {
+		t.Error("expected SetRefHash to reject a hash not present in the store, got nil")
 	}
-	if _, exists, _ := r.refHash("feature"); exists {
+	if _, exists, _ := r.RefHash("feature"); exists {
 		t.Error("ref should not have been created for an unknown patch hash")
 	}
 }

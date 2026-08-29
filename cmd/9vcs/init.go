@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdInit(args []string) error {
@@ -14,7 +16,7 @@ func cmdInit(args []string) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(cwd, dotDir)
+	dir := filepath.Join(cwd, repo.DotDir)
 	if _, err := os.Stat(dir); err == nil {
 		return fmt.Errorf("%s already exists", dir)
 	}
@@ -22,11 +24,11 @@ func cmdInit(args []string) error {
 		return err
 	}
 
-	r, err := openRepo(cwd)
+	r, err := repo.Open(cwd)
 	if err != nil {
 		return err
 	}
-	if err := r.setHeadBranch(defaultBranch); err != nil {
+	if err := r.SetHeadBranch(repo.DefaultBranch); err != nil {
 		return err
 	}
 

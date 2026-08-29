@@ -13,6 +13,7 @@ import (
 	"github.com/sandgorgon/9p/server"
 
 	"github.com/sandgorgon/9auth"
+	"github.com/sandgorgon/9vcs/repo"
 	"github.com/sandgorgon/9vcs/vcsfs"
 )
 
@@ -31,7 +32,7 @@ func cmdServe(args []string) error {
 	}
 	addr := rest[0]
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -39,12 +40,12 @@ func cmdServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
-	authorized, err := auth.LoadAuthorizedPeers(r.authorizedPeersFile())
+	authorized, err := auth.LoadAuthorizedPeers(r.AuthorizedPeersFile())
 	if err != nil {
 		return fmt.Errorf("serve: %w", err)
 	}
 	if len(authorized) == 0 {
-		fmt.Fprintf(os.Stderr, "9vcs serve: warning: %s is empty or missing; no peer will be able to connect\n", r.authorizedPeersFile())
+		fmt.Fprintf(os.Stderr, "9vcs serve: warning: %s is empty or missing; no peer will be able to connect\n", r.AuthorizedPeersFile())
 	}
 
 	tlsCfg := id.ServerTLSConfig(func(fp string) bool { return authorized.Allows(fp, auth.PermRead) })
@@ -60,13 +61,13 @@ func cmdServe(args []string) error {
 	// what decision #7's hardening item is guarding — see hardening.go.
 	ln = newRateLimitListener(ln, newIPRateLimiter(*maxConnsPerIPPerMin, time.Minute))
 	ln = newConnCapListener(ln, *maxConns)
-	fmt.Printf("serving %s on %s, identity %s\n", r.root, ln.Addr(), id.Fingerprint())
+	fmt.Printf("serving %s on %s, identity %s\n", r.Root, ln.Addr(), id.Fingerprint())
 
 	// One shared FS for every connection: unlike before ConnContext
 	// existed, per-connection identity no longer needs its own FS
 	// instance — it flows through the request context instead (see
 	// ConnContext below and vcsfs.WithPermission).
-	fsys := &vcsfs.FS{Store: r.store, Blobs: r.blobs, Refs: refAdapter{r}, Offers: r.offers}
+	fsys := &vcsfs.FS{Store: r.Store, Blobs: r.Blobs, Refs: r, Offers: r.Offers}
 	srv := &server.Server{
 		FS: fsys,
 		// Pinned explicitly rather than left at the zero value: Msize

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func TestValidRefNameRejectsTraversal(t *testing.T) {
@@ -21,8 +22,8 @@ func TestValidRefNameRejectsTraversal(t *testing.T) {
 		"a/b/",  // trailing slash
 	}
 	for _, name := range bad {
-		if validRefName(name) {
-			t.Errorf("validRefName(%q) = true, want false", name)
+		if repo.ValidRefName(name) {
+			t.Errorf("ValidRefName(%q) = true, want false", name)
 		}
 	}
 }
@@ -30,46 +31,46 @@ func TestValidRefNameRejectsTraversal(t *testing.T) {
 func TestValidRefNameAllowsOrdinaryAndNestedNames(t *testing.T) {
 	good := []string{"main", "feature/foo", "release/2026.08", "a/b/c"}
 	for _, name := range good {
-		if !validRefName(name) {
-			t.Errorf("validRefName(%q) = false, want true", name)
+		if !repo.ValidRefName(name) {
+			t.Errorf("ValidRefName(%q) = false, want true", name)
 		}
 	}
 }
 
 func TestRefHashRejectsInvalidName(t *testing.T) {
 	r := newTestRepo(t)
-	if _, _, err := r.refHash("../evil"); err == nil {
-		t.Fatal("expected refHash to refuse a traversal name, got nil error")
+	if _, _, err := r.RefHash("../evil"); err == nil {
+		t.Fatal("expected RefHash to refuse a traversal name, got nil error")
 	}
 }
 
-// TestRefAdapterSetRefHashRejectsTraversalEscape is the regression test
-// for a real, live-proven vulnerability: refAdapter is the exact
-// interface a peer's 9P Twalk/Tcreate drives directly over the network
-// (vcsfs.RefWriter/RefReader) — vcsfs itself has no path logic for refs
-// at all, and the 9p server library performs no validation of its own on
-// a wname/create-name element (each is passed straight to File.Walk; see
-// server/dispatch.go's tWalk), so a single crafted ref name containing
-// its own embedded "/../" sequences reached refPath's plain
-// filepath.Join(r.dir, "refs", name) unfiltered before this fix.
-// Confirmed live (then reverted): a real filepath.Rel-computed payload
-// wrote a ref file entirely outside the repo via exactly this call.
-func TestRefAdapterSetRefHashRejectsTraversalEscape(t *testing.T) {
+// TestSetRefHashRejectsTraversalEscape is the regression test for a
+// real, live-proven vulnerability: SetRefHash is the exact method a
+// peer's 9P Twalk/Tcreate drives directly over the network (*repo.Repo
+// satisfies vcsfs.RefWriter/RefReader directly — vcsfs itself has no
+// path logic for refs at all), and the 9p server library performs no
+// validation of its own on a wname/create-name element (each is passed
+// straight to File.Walk; see server/dispatch.go's tWalk), so a single
+// crafted ref name containing its own embedded "/../" sequences reached
+// refPath's plain filepath.Join(r.Dir, "refs", name) unfiltered before
+// this fix. Confirmed live (then reverted): a real filepath.Rel-computed
+// payload wrote a ref file entirely outside the repo via exactly this
+// call.
+func TestSetRefHashRejectsTraversalEscape(t *testing.T) {
 	r := newTestRepo(t)
 	outside := t.TempDir()
 
-	target, err := r.store.Put(&patches.Patch{Message: "attacker patch"})
+	target, err := r.Store.Put(&patches.Patch{Message: "attacker patch"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rel, err := filepath.Rel(filepath.Join(r.dir, "refs"), outside)
+	rel, err := filepath.Rel(filepath.Join(r.Dir, "refs"), outside)
 	if err != nil {
 		t.Fatal(err)
 	}
 	evilName := filepath.ToSlash(rel) + "/pwned"
 
-	adapter := refAdapter{r: r}
-	if err := adapter.SetRefHash(evilName, patches.Hash{}, target); err == nil {
+	if err := r.SetRefHash(evilName, patches.Hash{}, target); err == nil {
 		t.Fatal("expected SetRefHash to refuse a traversal ref name, got nil error")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "pwned")); !os.IsNotExist(err) {
@@ -77,23 +78,22 @@ func TestRefAdapterSetRefHashRejectsTraversalEscape(t *testing.T) {
 	}
 }
 
-// TestRefAdapterRefHashRejectsTraversalEscape is the read-side twin: the
-// same unvalidated name reaching RefHash could otherwise probe for the
+// TestRefHashRejectsTraversalEscape is the read-side twin: the same
+// unvalidated name reaching RefHash could otherwise probe for the
 // existence/content of arbitrary files outside .9vcs/refs.
-func TestRefAdapterRefHashRejectsTraversalEscape(t *testing.T) {
+func TestRefHashRejectsTraversalEscape(t *testing.T) {
 	r := newTestRepo(t)
 	outside := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("not a ref"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rel, err := filepath.Rel(filepath.Join(r.dir, "refs"), outside)
+	rel, err := filepath.Rel(filepath.Join(r.Dir, "refs"), outside)
 	if err != nil {
 		t.Fatal(err)
 	}
 	evilName := filepath.ToSlash(rel) + "/secret"
 
-	adapter := refAdapter{r: r}
-	if _, ok, err := adapter.RefHash(evilName); err == nil {
+	if _, ok, err := r.RefHash(evilName); err == nil {
 		t.Fatalf("expected RefHash to refuse a traversal ref name, got ok=%v err=nil", ok)
 	}
 }
@@ -105,7 +105,7 @@ func TestRefAdapterRefHashRejectsTraversalEscape(t *testing.T) {
 func TestSetLocalRefCASRejectsTraversalName(t *testing.T) {
 	r := newTestRepo(t)
 	base, _ := recordTestPatch(t, r, nil, "f.txt", []string{"one"}, patches.Index{})
-	if err := r.setLocalRefCAS("../../evil", patches.Hash{}, base); err == nil {
-		t.Error("expected setLocalRefCAS to refuse a traversal branch name, got nil")
+	if err := r.SetLocalRefCAS("../../evil", patches.Hash{}, base); err == nil {
+		t.Error("expected SetLocalRefCAS to refuse a traversal branch name, got nil")
 	}
 }

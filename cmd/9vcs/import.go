@@ -3,6 +3,8 @@ package main
 import (
 	"flag"
 	"fmt"
+
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdImport(args []string) error {
@@ -21,7 +23,7 @@ func cmdImport(args []string) error {
 		localName = rest[2]
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -36,13 +38,13 @@ func cmdImport(args []string) error {
 		return fmt.Errorf("import: %w", err)
 	}
 
-	stats, err := importClosure(c, r.store, r.blobs, remoteHash, peerFingerprint)
+	stats, err := importClosure(c, r.Store, r.Blobs, remoteHash, peerFingerprint)
 	if err != nil {
 		return fmt.Errorf("import: %w", err)
 	}
 	printImportStats(stats, peerFingerprint)
 
-	localHash, _, err := r.refHash(localName)
+	localHash, _, err := r.RefHash(localName)
 	if err != nil {
 		return fmt.Errorf("import: %w", err)
 	}

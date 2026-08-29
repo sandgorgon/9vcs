@@ -12,6 +12,7 @@ import (
 	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // cmdOffer dispatches on args[0] the same style cmdBundle already uses,
@@ -50,13 +51,13 @@ func cmdOfferPost(args []string) error {
 	}
 	addr, refArgs := rest[0], rest[1:]
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
 	roots := make([]patches.Hash, 0, len(refArgs))
 	for _, arg := range refArgs {
-		h, err := r.resolveRef(arg)
+		h, err := r.ResolveRef(arg)
 		if err != nil {
 			return fmt.Errorf("offer: %w", err)
 		}
@@ -67,7 +68,7 @@ func cmdOfferPost(args []string) error {
 	if err != nil {
 		return fmt.Errorf("offer: loading identity: %w", err)
 	}
-	data, n, err := bundle.Export(r.store, r.blobs, roots, *message, id.Key)
+	data, n, err := bundle.Export(r.Store, r.Blobs, roots, *message, id.Key)
 	if err != nil {
 		return fmt.Errorf("offer: %w", err)
 	}
@@ -163,7 +164,7 @@ func cmdOfferApply(args []string) error {
 	}
 	addr, offerID := rest[0], rest[1]
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -180,7 +181,7 @@ func cmdOfferApply(args []string) error {
 	if !b.Verify() {
 		return fmt.Errorf("offer apply: %s has an invalid signature — corrupted or tampered with", offerID)
 	}
-	if err := b.Store(r.store, r.blobs); err != nil {
+	if err := b.Store(r.Store, r.Blobs); err != nil {
 		return fmt.Errorf("offer apply: %w", err)
 	}
 	printBundleSummary(b)

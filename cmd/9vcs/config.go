@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // configKeys are the only keys `9vcs config` currently understands — not
@@ -21,7 +23,7 @@ var configKeys = map[string]bool{
 
 // repoConfigPath is this repo's local config file, checked first by
 // resolveConfigValue — same directory as refs/HEAD/authorized-peers.
-func repoConfigPath(r *repo) string { return filepath.Join(r.dir, "config") }
+func repoConfigPath(r *repo.Repo) string { return filepath.Join(r.Dir, "config") }
 
 // globalConfigPath is this install's user-wide config file, the fallback
 // for any key not set in a repo's local config.
@@ -137,7 +139,7 @@ func resolveConfigValue(repoPath, globalPath, key string) (string, error) {
 // resolvedAuthorField is resolveConfigValue against this repo's real
 // local and global config paths — what author() calls to build the
 // Author string, and what `9vcs config <key>` (without -global) prints.
-func resolvedAuthorField(r *repo, key string) (string, error) {
+func resolvedAuthorField(r *repo.Repo, key string) (string, error) {
 	global, err := globalConfigPath()
 	if err != nil {
 		return "", err
@@ -179,8 +181,8 @@ func setConfigValue(global bool, key, value string) error {
 	if global {
 		path, err = globalConfigPath()
 	} else {
-		var r *repo
-		r, err = findRepo()
+		var r *repo.Repo
+		r, err = repo.Find()
 		if err == nil {
 			path = repoConfigPath(r)
 		}
@@ -215,8 +217,8 @@ func getConfigValue(global bool, key string) error {
 			}
 		}
 	} else {
-		var r *repo
-		r, err = findRepo()
+		var r *repo.Repo
+		r, err = repo.Find()
 		if err == nil {
 			value, err = resolvedAuthorField(r, key)
 		}
