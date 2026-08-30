@@ -7,6 +7,7 @@ import (
 
 	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdLog(args []string) error {
@@ -19,7 +20,7 @@ func cmdLog(args []string) error {
 		return fmt.Errorf("log: too many arguments (expected [<ref>])")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -29,13 +30,13 @@ func cmdLog(args []string) error {
 		ok   bool
 	)
 	if len(rest) == 1 {
-		hash, err = r.resolveRef(rest[0])
+		hash, err = r.ResolveRef(rest[0])
 		if err != nil {
 			return fmt.Errorf("log: %w", err)
 		}
 		ok = true
 	} else {
-		hash, ok, err = r.headHash()
+		hash, ok, err = r.HeadHash()
 		if err != nil {
 			return fmt.Errorf("reading head: %w", err)
 		}
@@ -45,7 +46,7 @@ func cmdLog(args []string) error {
 		return nil
 	}
 
-	entries, err := patches.History(r.store, hash)
+	entries, err := patches.History(r.Store, hash)
 	if err != nil {
 		return fmt.Errorf("reading history: %w", err)
 	}

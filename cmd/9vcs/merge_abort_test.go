@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func TestMergeAbortNoMergeInProgressIsAnError(t *testing.T) {
@@ -26,10 +27,10 @@ func TestMergeAbortRestoresWorkingTreeAndClearsState(t *testing.T) {
 	ours, oursIdx := recordTestPatch(t, r, []patches.Hash{base}, "f.txt", []string{"one", "OURS", "three"}, idx)
 	theirs, _ := recordTestPatch(t, r, []patches.Hash{base}, "f.txt", []string{"one", "THEIRS", "three"}, idx)
 
-	if err := r.setLocalRefCAS(defaultBranch, patches.Hash{}, ours); err != nil {
+	if err := r.SetLocalRefCAS(repo.DefaultBranch, patches.Hash{}, ours); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeWorkingTree(r, patches.Index{}, oursIdx); err != nil {
+	if err := repo.WriteWorkingTree(r, patches.Index{}, oursIdx); err != nil {
 		t.Fatal(err)
 	}
 
@@ -40,17 +41,17 @@ func TestMergeAbortRestoresWorkingTreeAndClearsState(t *testing.T) {
 	if len(conflicts) == 0 {
 		t.Fatal("test setup expected a real conflict")
 	}
-	if err := writeWorkingTree(r, oursIdx, merged); err != nil {
+	if err := repo.WriteWorkingTree(r, oursIdx, merged); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setMergeHeads([]patches.Hash{theirs}); err != nil {
+	if err := r.SetMergeHeads([]patches.Hash{theirs}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Simulate the user having hand-edited the conflict-marker content
 	// before deciding to bail — abort must discard this too, same as
 	// git merge --abort.
-	if err := os.WriteFile(filepath.Join(r.root, "f.txt"), []byte("some half-finished resolution attempt\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(r.Root, "f.txt"), []byte("some half-finished resolution attempt\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,7 +59,7 @@ func TestMergeAbortRestoresWorkingTreeAndClearsState(t *testing.T) {
 		t.Fatalf("cmdMergeAbort: %v", err)
 	}
 
-	heads, err := r.mergeHeads()
+	heads, err := r.MergeHeads()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +67,7 @@ func TestMergeAbortRestoresWorkingTreeAndClearsState(t *testing.T) {
 		t.Errorf("mergeHeads after abort = %v, want empty", heads)
 	}
 
-	got, err := os.ReadFile(filepath.Join(r.root, "f.txt"))
+	got, err := os.ReadFile(filepath.Join(r.Root, "f.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,15 +77,15 @@ func TestMergeAbortRestoresWorkingTreeAndClearsState(t *testing.T) {
 	}
 
 	// changedFiles against head should now report a clean tree.
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	headIdx, err := r.materialize(head)
+	headIdx, err := r.Materialize(head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := changedFiles(r, headIdx)
+	changes, err := repo.ChangedFiles(r, headIdx)
 	if err != nil {
 		t.Fatal(err)
 	}

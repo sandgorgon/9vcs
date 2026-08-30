@@ -8,6 +8,7 @@ import (
 	"github.com/sandgorgon/9p/client"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // cmdReconcile syncs one ref with a peer in whichever direction is safe:
@@ -32,7 +33,7 @@ func cmdReconcile(args []string) error {
 		localName = rest[2]
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -46,7 +47,7 @@ func cmdReconcile(args []string) error {
 	if err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
-	localHash, _, err := r.refHash(localName)
+	localHash, _, err := r.RefHash(localName)
 	if err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
@@ -61,7 +62,7 @@ func cmdReconcile(args []string) error {
 	// there's nothing new — including the "we're actually ahead" case,
 	// where this just confirms it cheaply rather than transferring
 	// anything.
-	stats, err := importClosure(c, r.store, r.blobs, remoteHash, peerFingerprint)
+	stats, err := importClosure(c, r.Store, r.Blobs, remoteHash, peerFingerprint)
 	if err != nil {
 		return fmt.Errorf("reconcile: %w", err)
 	}
@@ -82,7 +83,7 @@ func cmdReconcile(args []string) error {
 		fmt.Printf("pulled %s's %q (%s) into local branch %q\n", addr, refName, remoteHash.String()[:12], localName)
 		return nil
 	case dirPush:
-		if err := pushRef(c, r.store, r.blobs, refName, remoteHash, localHash); err != nil {
+		if err := pushRef(c, r.Store, r.Blobs, refName, remoteHash, localHash); err != nil {
 			return fmt.Errorf("reconcile: %w", err)
 		}
 		fmt.Printf("pushed local branch %q (%s) to %s's %q\n", localName, localHash.String()[:12], addr, refName)

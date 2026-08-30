@@ -6,11 +6,12 @@ import (
 	"testing"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
-func symlinkTo(t *testing.T, r *repo, path, target string) {
+func symlinkTo(t *testing.T, r *repo.Repo, path, target string) {
 	t.Helper()
-	full := filepath.Join(r.root, filepath.FromSlash(path))
+	full := filepath.Join(r.Root, filepath.FromSlash(path))
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +24,7 @@ func TestChangedFilesDetectsNewSymlink(t *testing.T) {
 	r := newTestRepo(t)
 	symlinkTo(t, r, "current", "run.sh")
 
-	changes, err := changedFiles(r, patches.Index{})
+	changes, err := repo.ChangedFiles(r, patches.Index{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,15 +45,15 @@ func TestChangedFilesSymlinkUnchangedIsNotReported(t *testing.T) {
 	symlinkTo(t, r, "current", "run.sh")
 	recordForTest(t, r, "add symlink")
 
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := r.materialize(head)
+	base, err := r.Materialize(head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,17 +70,17 @@ func TestChangedFilesSymlinkUnchangedIsNotReported(t *testing.T) {
 // status even though the field exists and is correctly encoded.
 func TestChangedFilesExecutableOnlyChangeIsDetected(t *testing.T) {
 	r := newTestRepo(t)
-	full := filepath.Join(r.root, "run.sh")
+	full := filepath.Join(r.Root, "run.sh")
 	if err := os.WriteFile(full, []byte("#!/bin/sh\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	recordForTest(t, r, "add script, not executable")
 
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := r.materialize(head)
+	base, err := r.Materialize(head)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +91,7 @@ func TestChangedFilesExecutableOnlyChangeIsDetected(t *testing.T) {
 	if err := os.Chmod(full, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,10 +110,10 @@ func TestChangedFilesExecutableOnlyChangeIsDetected(t *testing.T) {
 func TestWriteWorkingTreeCreatesSymlink(t *testing.T) {
 	r := newTestRepo(t)
 	new := patches.Index{"current": {Kind: patches.KindSymlink, SymlinkTarget: "run.sh"}}
-	if err := writeWorkingTree(r, patches.Index{}, new); err != nil {
+	if err := repo.WriteWorkingTree(r, patches.Index{}, new); err != nil {
 		t.Fatal(err)
 	}
-	full := filepath.Join(r.root, "current")
+	full := filepath.Join(r.Root, "current")
 	info, err := os.Lstat(full)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +140,7 @@ func TestWriteWorkingTreeCreatesSymlink(t *testing.T) {
 // executable bit without an explicit chmod.
 func TestWriteWorkingTreeSetsExecutableBitOnExistingFile(t *testing.T) {
 	r := newTestRepo(t)
-	full := filepath.Join(r.root, "run.sh")
+	full := filepath.Join(r.Root, "run.sh")
 	if err := os.WriteFile(full, []byte("old content"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -149,16 +150,16 @@ func TestWriteWorkingTreeSetsExecutableBitOnExistingFile(t *testing.T) {
 	// FileGraph internals.
 	p := &patches.Patch{Changes: []patches.FileChange{{Path: "run.sh", Kind: patches.KindText, TrailingNewline: true, Executable: true,
 		Ops: []patches.LineOp{{Kind: patches.OpInsert, ID: "a", Content: "#!/bin/sh"}}}}}
-	h, err := r.store.Put(p)
+	h, err := r.Store.Put(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	new, err := r.materialize(h)
+	new, err := r.Materialize(h)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := writeWorkingTree(r, patches.Index{}, new); err != nil {
+	if err := repo.WriteWorkingTree(r, patches.Index{}, new); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(full)
@@ -172,23 +173,23 @@ func TestWriteWorkingTreeSetsExecutableBitOnExistingFile(t *testing.T) {
 
 func TestWriteWorkingTreeReplacesSymlinkWithRegularFile(t *testing.T) {
 	r := newTestRepo(t)
-	full := filepath.Join(r.root, "path")
+	full := filepath.Join(r.Root, "path")
 	if err := os.Symlink("elsewhere", full); err != nil {
 		t.Fatal(err)
 	}
 
 	p := &patches.Patch{Changes: []patches.FileChange{{Path: "path", Kind: patches.KindText, TrailingNewline: true,
 		Ops: []patches.LineOp{{Kind: patches.OpInsert, ID: "a", Content: "now a real file"}}}}}
-	h, err := r.store.Put(p)
+	h, err := r.Store.Put(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := r.materialize(h)
+	idx, err := r.Materialize(h)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := writeWorkingTree(r, patches.Index{}, idx); err != nil {
+	if err := repo.WriteWorkingTree(r, patches.Index{}, idx); err != nil {
 		t.Fatal(err)
 	}
 	info, err := os.Lstat(full)
@@ -224,16 +225,16 @@ func TestWriteWorkingTreeRefusesSymlinkPathEscape(t *testing.T) {
 		{Path: "evil/nested/proof.txt", Kind: patches.KindText, TrailingNewline: true,
 			Ops: []patches.LineOp{{Kind: patches.OpInsert, ID: "a", Content: "pwned"}}},
 	}}
-	h, err := r.store.Put(p)
+	h, err := r.Store.Put(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := r.materialize(h)
+	idx, err := r.Materialize(h)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := writeWorkingTree(r, patches.Index{}, idx); err == nil {
+	if err := repo.WriteWorkingTree(r, patches.Index{}, idx); err == nil {
 		t.Fatal("expected writeWorkingTree to refuse a write escaping through a symlink component, got nil")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "nested", "proof.txt")); !os.IsNotExist(err) {
@@ -249,10 +250,10 @@ func TestWriteWorkingTreeRefusesSymlinkPathEscape(t *testing.T) {
 func TestWriteWorkingTreeAllowsAbsoluteTargetLeafSymlink(t *testing.T) {
 	r := newTestRepo(t)
 	new := patches.Index{"bin/env": {Kind: patches.KindSymlink, SymlinkTarget: "/usr/bin/env"}}
-	if err := writeWorkingTree(r, patches.Index{}, new); err != nil {
+	if err := repo.WriteWorkingTree(r, patches.Index{}, new); err != nil {
 		t.Fatalf("a leaf symlink with an absolute target should be allowed: %v", err)
 	}
-	got, err := os.Readlink(filepath.Join(r.root, "bin", "env"))
+	got, err := os.Readlink(filepath.Join(r.Root, "bin", "env"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,15 +271,15 @@ func TestComputeMergeThreeWaySymlinkConflict(t *testing.T) {
 	base, idx := recordTestPatch(t, r, nil, "keep.txt", []string{"unrelated"}, patches.Index{})
 	_ = idx
 
-	a, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "a", Changes: []patches.FileChange{{Path: "current", Kind: patches.KindSymlink, SymlinkTarget: "v-a"}}})
+	a, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "a", Changes: []patches.FileChange{{Path: "current", Kind: patches.KindSymlink, SymlinkTarget: "v-a"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "current", Kind: patches.KindSymlink, SymlinkTarget: "v-b"}}})
+	b, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "current", Kind: patches.KindSymlink, SymlinkTarget: "v-b"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "c", Changes: []patches.FileChange{{Path: "current", Kind: patches.KindSymlink, SymlinkTarget: "v-c"}}})
+	c, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "c", Changes: []patches.FileChange{{Path: "current", Kind: patches.KindSymlink, SymlinkTarget: "v-c"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

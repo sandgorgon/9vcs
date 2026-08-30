@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // cmdStatus prints a one-line-per-path summary of what changedFiles would
@@ -23,19 +24,19 @@ func cmdStatus(args []string) error {
 		return fmt.Errorf("status: expected no arguments")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
-	branch, err := r.currentBranch()
+	branch, err := r.CurrentBranch()
 	if err != nil {
 		return fmt.Errorf("reading HEAD: %w", err)
 	}
-	head, _, err := r.headHash()
+	head, _, err := r.HeadHash()
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
-	mergeHeads, err := r.mergeHeads()
+	mergeHeads, err := r.MergeHeads()
 	if err != nil {
 		return fmt.Errorf("reading merge state: %w", err)
 	}
@@ -48,13 +49,13 @@ func cmdStatus(args []string) error {
 	if len(mergeHeads) > 0 {
 		base, _, err = computeMerge(r, append([]patches.Hash{head}, mergeHeads...)...)
 	} else {
-		base, err = r.materialize(head)
+		base, err = r.Materialize(head)
 	}
 	if err != nil {
 		return fmt.Errorf("replaying history: %w", err)
 	}
 
-	changes, err := changedFiles(r, base)
+	changes, err := repo.ChangedFiles(r, base)
 	if err != nil {
 		return err
 	}
@@ -71,7 +72,7 @@ func cmdStatus(args []string) error {
 		fmt.Println("nothing to record, working tree clean")
 		return nil
 	}
-	for _, p := range sortedPaths(changes) {
+	for _, p := range repo.SortedPaths(changes) {
 		fmt.Printf("%s  %s\n", statusLabel(changes[p], base), p)
 	}
 	return nil

@@ -1,4 +1,4 @@
-package main
+package repo
 
 import (
 	"bufio"
@@ -10,13 +10,13 @@ import (
 	"strings"
 )
 
-// ignoreFileName lives at the repo root, alongside tracked files — unlike
+// IgnoreFileName lives at the repo root, alongside tracked files — unlike
 // authorized-peers/known-peers/config (host-specific, under .9vcs, never
 // recorded), this one is meant to be recorded and shared with the team,
 // same as .gitignore. See PLAN.md decision #2's "Ignore patterns —
 // concrete scope" for the full design and its deliberate scope cuts
 // (no "!" negation, no "**", a single top-level file only).
-const ignoreFileName = ".9vcsignore"
+const IgnoreFileName = ".9vcsignore"
 
 // ignorePattern is one parsed line from .9vcsignore.
 type ignorePattern struct {
@@ -25,12 +25,12 @@ type ignorePattern struct {
 	dirOnly  bool     // trailing "/" in the source line: the match must land on a real ancestor directory, never the final filename
 }
 
-// loadIgnore reads .9vcsignore at root. A missing file means no patterns —
+// LoadIgnore reads .9vcsignore at root. A missing file means no patterns —
 // the same "missing file is not an error" convention every other flat
 // text file in this codebase already uses (authorized-peers, known-peers,
 // 9vcs config).
-func loadIgnore(root string) (ignoreMatcher, error) {
-	f, err := os.Open(filepath.Join(root, ignoreFileName))
+func LoadIgnore(root string) (ignoreMatcher, error) {
+	f, err := os.Open(filepath.Join(root, IgnoreFileName))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -48,7 +48,7 @@ func loadIgnore(root string) (ignoreMatcher, error) {
 		}
 		pat, err := parseIgnorePattern(line)
 		if err != nil {
-			return nil, fmt.Errorf("%s:%d: %w", ignoreFileName, lineNo, err)
+			return nil, fmt.Errorf("%s:%d: %w", IgnoreFileName, lineNo, err)
 		}
 		out = append(out, pat)
 	}
@@ -77,7 +77,7 @@ func parseIgnorePattern(line string) (ignorePattern, error) {
 }
 
 // matches reports whether p — a repo-relative, slash-separated file path
-// (workingFiles never returns directories) — is covered by pat.
+// (WorkingFiles never returns directories) — is covered by pat.
 //
 // Matching any directory component along p, not just the final filename,
 // excludes everything beneath it — the same rule real gitignore uses: a
@@ -111,7 +111,7 @@ func (pat ignorePattern) matches(p string) bool {
 
 // ignoreMatcher is a parsed .9vcsignore: every pattern is a plain
 // inclusion test, ORed together — there's no "!" negation to reorder
-// around (see the package doc comment on ignoreFileName).
+// around (see the package doc comment on IgnoreFileName).
 type ignoreMatcher []ignorePattern
 
 func (m ignoreMatcher) matches(p string) bool {

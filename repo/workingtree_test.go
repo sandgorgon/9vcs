@@ -1,4 +1,4 @@
-package main
+package repo
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 	"github.com/sandgorgon/9vcs/objstore/patches"
 )
 
-// TestSplitJoinRoundTrip checks the bug fixed in this pass: joinLines used
+// TestSplitJoinRoundTrip checks the bug fixed in this pass: JoinLines used
 // to always append a trailing newline, corrupting any file — text or
 // binary — that didn't originally end in one.
 func TestSplitJoinRoundTrip(t *testing.T) {
@@ -21,27 +21,27 @@ func TestSplitJoinRoundTrip(t *testing.T) {
 		"no newline at all",
 	}
 	for _, s := range cases {
-		trailing := hasTrailingNewline([]byte(s))
-		lines := splitLines(s)
+		trailing := HasTrailingNewline([]byte(s))
+		lines := SplitLines(s)
 		var pl []patches.Line
 		for _, c := range lines {
 			pl = append(pl, patches.Line{Content: c})
 		}
-		got := joinLines(pl, trailing)
+		got := JoinLines(pl, trailing)
 		if got != s {
-			t.Errorf("round trip failed: splitLines/joinLines(%q) = %q", s, got)
+			t.Errorf("round trip failed: SplitLines/JoinLines(%q) = %q", s, got)
 		}
 	}
 }
 
 func TestIsBinary(t *testing.T) {
-	if isBinary([]byte("plain ascii text\nwith newlines\n")) {
-		t.Error("isBinary(text) = true, want false")
+	if IsBinary([]byte("plain ascii text\nwith newlines\n")) {
+		t.Error("IsBinary(text) = true, want false")
 	}
-	if !isBinary([]byte("PNG\x00\x01\x02garbage")) {
-		t.Error("isBinary(NUL-containing) = false, want true")
+	if !IsBinary([]byte("PNG\x00\x01\x02garbage")) {
+		t.Error("IsBinary(NUL-containing) = false, want true")
 	}
-	if isBinary(nil) {
-		t.Error("isBinary(nil) = true, want false")
+	if IsBinary(nil) {
+		t.Error("IsBinary(nil) = true, want false")
 	}
 }

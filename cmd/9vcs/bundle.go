@@ -8,6 +8,7 @@ import (
 	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdBundle(args []string) error {
@@ -41,13 +42,13 @@ func cmdBundleExport(args []string) error {
 		return fmt.Errorf("bundle export: -o <file> is required")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
 	roots := make([]patches.Hash, 0, len(rest))
 	for _, arg := range rest {
-		h, err := r.resolveRef(arg)
+		h, err := r.ResolveRef(arg)
 		if err != nil {
 			return fmt.Errorf("bundle export: %w", err)
 		}
@@ -59,7 +60,7 @@ func cmdBundleExport(args []string) error {
 		return fmt.Errorf("bundle export: loading identity: %w", err)
 	}
 
-	data, n, err := bundle.Export(r.store, r.blobs, roots, *message, id.Key)
+	data, n, err := bundle.Export(r.Store, r.Blobs, roots, *message, id.Key)
 	if err != nil {
 		return fmt.Errorf("bundle export: %w", err)
 	}
@@ -97,7 +98,7 @@ func cmdBundleImport(args []string) error {
 		return fmt.Errorf("bundle import: usage: 9vcs bundle import <file>")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -105,7 +106,7 @@ func cmdBundleImport(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := b.Store(r.store, r.blobs); err != nil {
+	if err := b.Store(r.Store, r.Blobs); err != nil {
 		return fmt.Errorf("bundle import: %w", err)
 	}
 	printBundleSummary(b)

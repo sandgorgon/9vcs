@@ -6,14 +6,15 @@ import (
 	"testing"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func TestWriteSidecarFileCreatesFileWithContent(t *testing.T) {
 	r := newTestRepo(t)
-	if err := writeSidecarFile(r, "logo.png.abc123456789", []byte("binary content")); err != nil {
+	if err := repo.WriteSidecarFile(r, "logo.png.abc123456789", []byte("binary content")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(filepath.Join(r.root, "logo.png.abc123456789"))
+	got, err := os.ReadFile(filepath.Join(r.Root, "logo.png.abc123456789"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,11 +44,11 @@ func TestWriteSidecarFileCreatesFileWithContent(t *testing.T) {
 func TestWriteSidecarFileRefusesSymlinkPathEscape(t *testing.T) {
 	r := newTestRepo(t)
 	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(r.root, "evil")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(r.Root, "evil")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := writeSidecarFile(r, "evil/pwned.bin.abc123456789", []byte("ATTACKER PAYLOAD")); err == nil {
+	if err := repo.WriteSidecarFile(r, "evil/pwned.bin.abc123456789", []byte("ATTACKER PAYLOAD")); err == nil {
 		t.Fatal("expected writeSidecarFile to refuse writing through a symlink escaping the repo")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "pwned.bin.abc123456789")); !os.IsNotExist(err) {
@@ -62,11 +63,11 @@ func TestRemoveSidecarFileRefusesSymlinkPathEscape(t *testing.T) {
 	if err := os.WriteFile(victim, []byte("do not delete me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(r.root, "evil")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(r.Root, "evil")); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := removeSidecarFile(r, "evil/innocent.txt"); err == nil {
+	if err := repo.RemoveSidecarFile(r, "evil/innocent.txt"); err == nil {
 		t.Fatal("expected removeSidecarFile to refuse removing through a symlink escaping the repo")
 	}
 	if _, err := os.Stat(victim); err != nil {
@@ -86,18 +87,18 @@ func TestMergeAbortRefusesSidecarRemovalThroughSymlinkEscape(t *testing.T) {
 	if err := os.WriteFile(victim, []byte("do not delete me"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(r.root, "evil")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(r.Root, "evil")); err != nil {
 		t.Fatal(err)
 	}
 
 	base, _ := recordTestPatch(t, r, nil, "f.txt", []string{"one"}, patches.Index{})
-	if err := r.setLocalRefCAS(defaultBranch, patches.Hash{}, base); err != nil {
+	if err := r.SetLocalRefCAS(repo.DefaultBranch, patches.Hash{}, base); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setMergeHeads([]patches.Hash{base}); err != nil {
+	if err := r.SetMergeHeads([]patches.Hash{base}); err != nil {
 		t.Fatal(err)
 	}
-	if err := r.setMergeSidecars([]string{"evil/innocent.txt"}); err != nil {
+	if err := r.SetMergeSidecars([]string{"evil/innocent.txt"}); err != nil {
 		t.Fatal(err)
 	}
 

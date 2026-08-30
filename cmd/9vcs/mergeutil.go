@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // mergeConflict is one path computeMerge couldn't resolve automatically.
@@ -59,14 +60,14 @@ func sideLabel(roots []patches.Hash, i int) string {
 // what to write to the working tree, record to compute a base that
 // actually matches what's on disk mid-merge — so this is the one place it
 // happens, called by both (and, for N > 2, by apply).
-func computeMerge(r *repo, roots ...patches.Hash) (patches.Index, []mergeConflict, error) {
-	merged, err := r.materialize(roots...)
+func computeMerge(r *repo.Repo, roots ...patches.Hash) (patches.Index, []mergeConflict, error) {
+	merged, err := r.Materialize(roots...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("replaying merged history: %w", err)
 	}
 	idxs := make([]patches.Index, len(roots))
 	for i, root := range roots {
-		idxs[i], err = r.materialize(root)
+		idxs[i], err = r.Materialize(root)
 		if err != nil {
 			return nil, nil, fmt.Errorf("replaying history for %s: %w", root, err)
 		}
@@ -179,11 +180,11 @@ func computeMerge(r *repo, roots ...patches.Hash) (patches.Index, []mergeConflic
 				others = append(others, o)
 			}
 		}
-		othersClosure, err := patches.Closure(r.store, others...)
+		othersClosure, err := patches.Closure(r.Store, others...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("replaying history for %s: %w", root, err)
 		}
-		deletedBy[i], modifiedBy[i], err = patches.UniqueChanges(r.store, root, othersClosure)
+		deletedBy[i], modifiedBy[i], err = patches.UniqueChanges(r.Store, root, othersClosure)
 		if err != nil {
 			return nil, nil, err
 		}

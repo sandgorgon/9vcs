@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // recordTestPatch builds a patch out of a plain-text edit against base's
@@ -11,7 +12,7 @@ import (
 // updated Index — the cmd/9vcs-side equivalent of objstore/patches'
 // private test helper of the same shape, needed here since computeMerge
 // lives in this package.
-func recordTestPatch(t *testing.T, r *repo, deps []patches.Hash, path string, content []string, base patches.Index) (patches.Hash, patches.Index) {
+func recordTestPatch(t *testing.T, r *repo.Repo, deps []patches.Hash, path string, content []string, base patches.Index) (patches.Hash, patches.Index) {
 	t.Helper()
 	var oldLines []patches.Line
 	if st, ok := base[path]; ok && st.Kind == patches.KindText {
@@ -19,11 +20,11 @@ func recordTestPatch(t *testing.T, r *repo, deps []patches.Hash, path string, co
 	}
 	ops, _ := patches.Diff(oldLines, content)
 	p := &patches.Patch{Dependencies: deps, Message: "x", Changes: []patches.FileChange{{Path: path, Kind: patches.KindText, Ops: ops, TrailingNewline: true}}}
-	h, err := r.store.Put(p)
+	h, err := r.Store.Put(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	idx, err := r.materialize(h)
+	idx, err := r.Materialize(h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestComputeMergeThreeWayModifyDeleteIgnoresUninvolvedSide(t *testing.T) {
 	base, idx = recordTestPatch(t, r, []patches.Hash{base}, "untouched.txt", []string{"keep"}, idx)
 
 	delPatch := &patches.Patch{Dependencies: []patches.Hash{base}, Message: "delete", Changes: []patches.FileChange{{Path: "victim.txt", Kind: patches.KindDelete}}}
-	a, err := r.store.Put(delPatch)
+	a, err := r.Store.Put(delPatch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,27 +158,27 @@ func TestComputeMergeThreeWayBinaryConflict(t *testing.T) {
 
 	base, idx := recordTestPatch(t, r, nil, "keep.txt", []string{"unrelated"}, patches.Index{})
 
-	blobA, err := r.blobs.Put([]byte("content A"))
+	blobA, err := r.Blobs.Put([]byte("content A"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	blobB, err := r.blobs.Put([]byte("content B"))
+	blobB, err := r.Blobs.Put([]byte("content B"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	blobC, err := r.blobs.Put([]byte("content C"))
+	blobC, err := r.Blobs.Put([]byte("content C"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "a", Changes: []patches.FileChange{{Path: "logo.png", Kind: patches.KindBlob, Blob: blobA}}})
+	a, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "a", Changes: []patches.FileChange{{Path: "logo.png", Kind: patches.KindBlob, Blob: blobA}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "logo.png", Kind: patches.KindBlob, Blob: blobB}}})
+	b, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "logo.png", Kind: patches.KindBlob, Blob: blobB}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "c", Changes: []patches.FileChange{{Path: "logo.png", Kind: patches.KindBlob, Blob: blobC}}})
+	c, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "c", Changes: []patches.FileChange{{Path: "logo.png", Kind: patches.KindBlob, Blob: blobC}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,24 +210,24 @@ func TestComputeMergeThreeWayBinaryConflictAbsentFromOurs(t *testing.T) {
 	base, idx := recordTestPatch(t, r, nil, "keep.txt", []string{"unrelated"}, patches.Index{})
 	_ = idx
 
-	blobB, err := r.blobs.Put([]byte("content B"))
+	blobB, err := r.Blobs.Put([]byte("content B"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	blobC, err := r.blobs.Put([]byte("content C"))
+	blobC, err := r.Blobs.Put([]byte("content C"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// a never touches new.png at all.
-	a, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "a", Changes: nil})
+	a, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "a", Changes: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "new.png", Kind: patches.KindBlob, Blob: blobB}}})
+	b, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "new.png", Kind: patches.KindBlob, Blob: blobB}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "c", Changes: []patches.FileChange{{Path: "new.png", Kind: patches.KindBlob, Blob: blobC}}})
+	c, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "c", Changes: []patches.FileChange{{Path: "new.png", Kind: patches.KindBlob, Blob: blobC}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,11 +263,11 @@ func TestComputeMergeThreeWayTypeMismatchConflict(t *testing.T) {
 	a, _ := recordTestPatch(t, r, []patches.Hash{base}, "thing", []string{"hello", "world"}, idx)
 
 	// b introduces the same path as a binary blob instead.
-	blobB, err := r.blobs.Put([]byte("binary content"))
+	blobB, err := r.Blobs.Put([]byte("binary content"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := r.store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "thing", Kind: patches.KindBlob, Blob: blobB}}})
+	b, err := r.Store.Put(&patches.Patch{Dependencies: []patches.Hash{base}, Message: "b", Changes: []patches.FileChange{{Path: "thing", Kind: patches.KindBlob, Blob: blobB}}})
 	if err != nil {
 		t.Fatal(err)
 	}

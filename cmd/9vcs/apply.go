@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // cmdApply is `merge`'s N-way sibling: integrate one or more specific
@@ -26,18 +27,18 @@ func cmdApply(args []string) error {
 		return fmt.Errorf("apply: expected at least one <patch-hash-or-ref>")
 	}
 
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
 
-	if heads, err := r.mergeHeads(); err != nil {
+	if heads, err := r.MergeHeads(); err != nil {
 		return err
 	} else if len(heads) > 0 {
 		return fmt.Errorf("apply: a merge is already in progress; resolve conflicts and run record, or `9vcs merge -abort` to abandon it")
 	}
 
-	branch, err := r.currentBranch()
+	branch, err := r.CurrentBranch()
 	if err != nil {
 		return fmt.Errorf("reading HEAD: %w", err)
 	}
@@ -45,11 +46,11 @@ func cmdApply(args []string) error {
 		return fmt.Errorf("apply: HEAD is detached; check out a branch first")
 	}
 
-	ours, _, err := r.headHash()
+	ours, _, err := r.HeadHash()
 	if err != nil {
 		return fmt.Errorf("reading head: %w", err)
 	}
-	oursClosure, err := patches.Closure(r.store, ours)
+	oursClosure, err := patches.Closure(r.Store, ours)
 	if err != nil {
 		return fmt.Errorf("replaying current history: %w", err)
 	}
@@ -60,7 +61,7 @@ func cmdApply(args []string) error {
 	seen := map[patches.Hash]bool{}
 	var targets []patches.Hash
 	for _, arg := range rest {
-		h, err := r.resolveRef(arg)
+		h, err := r.ResolveRef(arg)
 		if err != nil {
 			return fmt.Errorf("apply: %w", err)
 		}
@@ -76,11 +77,11 @@ func cmdApply(args []string) error {
 		return nil
 	}
 
-	oursIdx, err := r.materialize(ours)
+	oursIdx, err := r.Materialize(ours)
 	if err != nil {
 		return fmt.Errorf("replaying current history: %w", err)
 	}
-	dirty, err := changedFiles(r, oursIdx)
+	dirty, err := repo.ChangedFiles(r, oursIdx)
 	if err != nil {
 		return err
 	}
@@ -94,19 +95,19 @@ func cmdApply(args []string) error {
 	// applies (nothing left to actually combine), so it's not worth
 	// generalizing further than the single-target case.
 	if len(targets) == 1 {
-		targetClosure, err := patches.Closure(r.store, targets[0])
+		targetClosure, err := patches.Closure(r.Store, targets[0])
 		if err != nil {
 			return fmt.Errorf("replaying %s: %w", targets[0], err)
 		}
 		if targetClosure[ours] {
-			targetIdx, err := r.materialize(targets[0])
+			targetIdx, err := r.Materialize(targets[0])
 			if err != nil {
 				return fmt.Errorf("replaying %s: %w", targets[0], err)
 			}
-			if err := writeWorkingTree(r, oursIdx, targetIdx); err != nil {
+			if err := repo.WriteWorkingTree(r, oursIdx, targetIdx); err != nil {
 				return fmt.Errorf("writing working tree: %w", err)
 			}
-			if err := r.setLocalRefCAS(branch, ours, targets[0]); err != nil {
+			if err := r.SetLocalRefCAS(branch, ours, targets[0]); err != nil {
 				return err
 			}
 			fmt.Printf("fast-forwarded %s to %s\n", branch, targets[0].String()[:12])
@@ -133,7 +134,7 @@ func cmdApply(args []string) error {
 		for _, t := range targets {
 			idx, ok := targetIdxs[t]
 			if !ok {
-				idx, err = r.materialize(t)
+				idx, err = r.Materialize(t)
 				if err != nil {
 					return fmt.Errorf("replaying %s: %w", t, err)
 				}
@@ -146,25 +147,25 @@ func cmdApply(args []string) error {
 			if oursSt, ok := oursIdx[c.Path]; ok && oursSt.Kind == patches.KindBlob && oursSt.Blob == st.Blob {
 				continue // this target agrees with ours, nothing to compare
 			}
-			data, err := r.blobs.Get(st.Blob)
+			data, err := r.Blobs.Get(st.Blob)
 			if err != nil {
 				return fmt.Errorf("reading blob for %s: %w", c.Path, err)
 			}
-			sidecar := binaryConflictSidecar(c.Path, t)
-			if err := writeSidecarFile(r, sidecar, data); err != nil {
+			sidecar := repo.BinaryConflictSidecar(c.Path, t)
+			if err := repo.WriteSidecarFile(r, sidecar, data); err != nil {
 				return fmt.Errorf("writing %s: %w", sidecar, err)
 			}
 			sidecars = append(sidecars, sidecar)
 		}
 	}
 
-	if err := writeWorkingTree(r, oursIdx, merged); err != nil {
+	if err := repo.WriteWorkingTree(r, oursIdx, merged); err != nil {
 		return fmt.Errorf("writing working tree: %w", err)
 	}
-	if err := r.setMergeHeads(targets); err != nil {
+	if err := r.SetMergeHeads(targets); err != nil {
 		return fmt.Errorf("recording merge state: %w", err)
 	}
-	if err := r.setMergeSidecars(sidecars); err != nil {
+	if err := r.SetMergeSidecars(sidecars); err != nil {
 		return fmt.Errorf("recording merge state: %w", err)
 	}
 

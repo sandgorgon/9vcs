@@ -4,10 +4,11 @@ import (
 	"fmt"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdBranch(args []string) error {
-	r, err := findRepo()
+	r, err := repo.Find()
 	if err != nil {
 		return err
 	}
@@ -20,7 +21,7 @@ func cmdBranch(args []string) error {
 	}
 
 	name := args[0]
-	if _, ok, err := r.refHash(name); err != nil {
+	if _, ok, err := r.RefHash(name); err != nil {
 		return err
 	} else if ok {
 		return fmt.Errorf("branch %q already exists", name)
@@ -28,12 +29,12 @@ func cmdBranch(args []string) error {
 
 	var start patches.Hash
 	if len(args) == 2 {
-		start, err = r.resolveRef(args[1])
+		start, err = r.ResolveRef(args[1])
 		if err != nil {
 			return fmt.Errorf("branch: %w", err)
 		}
 	} else {
-		start, _, err = r.headHash()
+		start, _, err = r.HeadHash()
 		if err != nil {
 			return fmt.Errorf("reading head: %w", err)
 		}
@@ -42,19 +43,19 @@ func cmdBranch(args []string) error {
 		}
 	}
 
-	if err := r.setLocalRefCAS(name, patches.Hash{}, start); err != nil {
+	if err := r.SetLocalRefCAS(name, patches.Hash{}, start); err != nil {
 		return err
 	}
 	fmt.Printf("created branch %s at %s\n", name, start.String()[:12])
 	return nil
 }
 
-func listBranches(r *repo) error {
-	names, err := r.listBranches()
+func listBranches(r *repo.Repo) error {
+	names, err := r.ListRefs()
 	if err != nil {
 		return err
 	}
-	current, err := r.currentBranch()
+	current, err := r.CurrentBranch()
 	if err != nil {
 		return err
 	}

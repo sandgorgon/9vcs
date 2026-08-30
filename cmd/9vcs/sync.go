@@ -14,6 +14,7 @@ import (
 
 	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/objstore/patches"
+	"github.com/sandgorgon/9vcs/repo"
 )
 
 // dialPeer connects to addr over TLS and attaches to its root, returning
@@ -144,7 +145,7 @@ const (
 // a sentinel, not a real dependency), so the zero-hash cases need their
 // own branches rather than falling out of the general closure-membership
 // check below.
-func classify(r *repo, localHash, remoteHash patches.Hash) (syncDirection, error) {
+func classify(r *repo.Repo, localHash, remoteHash patches.Hash) (syncDirection, error) {
 	switch {
 	case localHash == remoteHash:
 		return dirUpToDate, nil
@@ -153,14 +154,14 @@ func classify(r *repo, localHash, remoteHash patches.Hash) (syncDirection, error
 	case remoteHash.IsZero():
 		return dirPush, nil
 	}
-	remoteClosure, err := patches.Closure(r.store, remoteHash)
+	remoteClosure, err := patches.Closure(r.Store, remoteHash)
 	if err != nil {
 		return 0, err
 	}
 	if remoteClosure[localHash] {
 		return dirPull, nil
 	}
-	localClosure, err := patches.Closure(r.store, localHash)
+	localClosure, err := patches.Closure(r.Store, localHash)
 	if err != nil {
 		return 0, err
 	}
@@ -186,32 +187,32 @@ func classify(r *repo, localHash, remoteHash patches.Hash) (syncDirection, error
 // into the checked-out branch has to behave like a fast-forward checkout
 // instead — refusing if that would overwrite uncommitted changes, exactly
 // as checkout's own safety check does.
-func pullRef(r *repo, localName string, localHash, remoteHash patches.Hash) error {
-	branch, err := r.currentBranch()
+func pullRef(r *repo.Repo, localName string, localHash, remoteHash patches.Hash) error {
+	branch, err := r.CurrentBranch()
 	if err != nil {
 		return err
 	}
 	if branch == localName {
-		oldIdx, err := r.materialize(localHash)
+		oldIdx, err := r.Materialize(localHash)
 		if err != nil {
 			return err
 		}
-		dirty, err := changedFiles(r, oldIdx)
+		dirty, err := repo.ChangedFiles(r, oldIdx)
 		if err != nil {
 			return err
 		}
 		if len(dirty) > 0 {
 			return fmt.Errorf("%q is checked out and has uncommitted changes that would be overwritten; record or discard them first", localName)
 		}
-		newIdx, err := r.materialize(remoteHash)
+		newIdx, err := r.Materialize(remoteHash)
 		if err != nil {
 			return err
 		}
-		if err := writeWorkingTree(r, oldIdx, newIdx); err != nil {
+		if err := repo.WriteWorkingTree(r, oldIdx, newIdx); err != nil {
 			return fmt.Errorf("writing working tree: %w", err)
 		}
 	}
-	return r.setLocalRefCAS(localName, localHash, remoteHash)
+	return r.SetLocalRefCAS(localName, localHash, remoteHash)
 }
 
 // fetchRefHash fetches a peer's ref, treating its absence as an error —
