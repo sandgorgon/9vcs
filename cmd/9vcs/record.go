@@ -14,11 +14,20 @@ import (
 func cmdRecord(args []string) error {
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
 	message := fs.String("m", "", "patch message")
+	interactive := fs.Bool("p", false, "interactively select which pending changes to record")
+	var linesSel pathIDsFlag
+	fs.Var(&linesSel, "lines", "select specific line ids to record: PATH:ID[,ID...] (repeatable)")
+	var filesSel pathsFlag
+	fs.Var(&filesSel, "files", "select entire file changes to record: PATH[,PATH...] (repeatable)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *message == "" {
 		return fmt.Errorf("record: -m MESSAGE is required")
+	}
+	explicitSelection := len(linesSel.m) > 0 || len(filesSel.m) > 0
+	if *interactive && explicitSelection {
+		return fmt.Errorf("record: -p can't be combined with -lines/-files")
 	}
 
 	r, err := repo.Find()
@@ -138,6 +147,22 @@ func cmdRecord(args []string) error {
 		}
 		ops := modifyDeleteKeptTextOps(base, c.Path, content)
 		changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindText, Ops: ops, TrailingNewline: repo.HasTrailingNewline(content), Executable: executable}
+	}
+
+	if (*interactive || explicitSelection) && midMerge {
+		return fmt.Errorf("record: selective record isn't supported during an in-progress merge; resolve conflicts and record normally")
+	}
+	if *interactive {
+		changes, err = interactiveSelect(changes, base, os.Stdin, os.Stdout)
+		if err != nil {
+			return fmt.Errorf("record: %w", err)
+		}
+	} else if explicitSelection {
+		sel := repo.Selection{Files: filesSel.m, Lines: linesSel.m}
+		changes, err = sel.Apply(changes)
+		if err != nil {
+			return fmt.Errorf("record: %w", err)
+		}
 	}
 
 	if len(changes) == 0 && !midMerge {

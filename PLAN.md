@@ -2291,6 +2291,65 @@ used to say:
   signature verified. Unblocks the companion "selective (partial) record,
   keyed by line identity" spec (#25), which depends on this library
   boundary existing.
+- Selective (partial) record, keyed by line identity (2026-08-29, closes
+  #25): `9vcs record` can now fold a subset of pending changes into a
+  patch, leaving the rest still pending — `9vcs record -p` (darcs-style,
+  prompts y/n/q per pending change, per-line for text) or
+  `9vcs record --lines PATH:ID[,ID...]` / `--files PATH[,PATH...]`
+  (programmatic, repeatable flags) for scripts or an external tool that
+  already computed the diff itself via `repo.ChangedFiles`. Two open
+  questions the issue left for the maintainer: disallowed entirely during
+  an in-progress merge (same restriction whole-tree record already has —
+  a partial record of an unresolved conflict has no well-defined
+  meaning), and multi-file is allowed in one invocation, consistent with
+  whole-tree record today.
+  **Core primitive**: `repo.SelectOps(ops, selected)` narrows a
+  `ChangedFiles`-produced op list down to the selected line IDs.
+  A delete op needs no adjustment — `Diff` computes its Prev/Next from
+  pre-existing line IDs, never from another op in the same batch, so
+  `graph.go`'s `resolveAlive` chases a chain of dead nodes to whatever's
+  still alive regardless of which subset of them actually died (verified
+  by reasoning through `resolveAlive`'s recursion, not assumed). An
+  insert is the real subtlety: consecutive new lines chain through each
+  other's freshly-minted IDs (`Diff` sets each one's `Prev` to the
+  previous insert's ID), so naively dropping one from the middle of that
+  chain would leave a survivor pointing at an ID that was never created.
+  Fixed by re-deriving each selected insert's `Prev` through a
+  resolve-through-unselected map — exactly the same recurrence `Diff`
+  itself uses to chain a run of inserts, just applied to the selected
+  subsequence — so a non-contiguous selection (e.g. keep the 1st and 3rd
+  of three new consecutive lines, drop the 2nd) still produces a valid,
+  independently-replayable op list.
+  **Why the unselected side needs no bookkeeping at all**: the only
+  output selective record produces is the narrowed op list for the patch
+  being recorded now. What's left pending is never separately computed
+  or persisted — the next `ChangedFiles` call, run against the newly-
+  advanced base, simply re-diffs the (untouched) working-tree content
+  and regenerates exactly the still-pending ops on its own, with fresh
+  IDs for any still-pending inserts (an insert's ID was never meaningful
+  across two separate diffs to begin with). This is the direct payoff of
+  #26's library extraction: `repo.ChangedFiles` was already the single
+  source of truth for "what's pending," so selection only ever needs to
+  filter its output once, not maintain a second copy of repo state.
+  **Verified**: `repo.SelectOps`/`repo.Selection.Apply` unit tests cover
+  independent edits, the non-contiguous insert-chain re-anchoring case
+  (replayed through the real `Store`/`Materialize` pipeline, not just
+  asserted on the op structs), and every rejection path (unknown path,
+  lines selection on a non-text change, a path selected by both `Files`
+  and `Lines`, an empty selection) — plus an end-to-end test proving the
+  no-bookkeeping claim above: two independent edits to one file, only one
+  selected, and a subsequent `ChangedFiles` against the new base reports
+  exactly the other one as still pending, unprompted. Verified live with
+  the real binary: an insert and an unrelated delete in one file, `record
+  -p` answering y/n split them into two separate patches with correct
+  per-patch diffs and a clean tree at the end; `--files` recorded a new
+  binary file while leaving an unrelated new text file pending;
+  combining `-p` with `--lines`/`--files` is refused; answering `n` to
+  everything in `-p` is refused with "no changes selected" and touches
+  nothing; and a real three-way merge conflict correctly refused both
+  `-p` and `--files` with "selective record isn't supported during an
+  in-progress merge," while ordinary whole-tree `record` after resolving
+  it worked exactly as before.
 
 ## Open items to revisit
 
