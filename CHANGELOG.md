@@ -7,6 +7,28 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.4] - 2026-08-29
+
+### Added
+
+- Selective (partial) record: `9vcs record -p` interactively prompts
+  (darcs-style) over which pending changes to fold into a patch, or
+  `--lines PATH:ID[,ID...]` / `--files PATH[,PATH...]` select them
+  programmatically. Anything not selected stays pending, exactly as if
+  it hadn't been touched — keyed by 9vcs's existing per-line identity
+  rather than a fragile byte-offset hunk, so a selection stays
+  well-defined even as other pending edits in the same file are
+  selected or left for later.
+
+### Changed
+
+- The repo-state/working-tree-diff logic (`ChangedFiles`,
+  `WriteWorkingTree`, ref/HEAD/merge-state handling, and related
+  helpers) moved out of the unexported `cmd/9vcs` package into a new
+  importable `github.com/sandgorgon/9vcs/repo` package, so an external
+  Go program can open a repo and compute a working-tree diff without
+  shelling out to the `9vcs` binary. No CLI behavior change.
+
 ## [0.1.3] - 2026-08-28
 
 ### Added
