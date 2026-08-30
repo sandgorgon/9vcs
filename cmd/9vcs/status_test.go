@@ -79,9 +79,9 @@ func TestStatusReportsAddedModifiedDeletedAndSkipsIgnored(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"keep.txt":     "M",
-		"new.txt":      "A",
-		"gone.txt":     "D",
+		"keep.txt":          "M",
+		"new.txt":           "A",
+		"gone.txt":          "D",
 		repo.IgnoreFileName: "A", // .9vcsignore itself is newly recorded here, and correctly not exempt from its own rules
 	}
 	if len(changes) != len(want) {
