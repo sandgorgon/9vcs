@@ -1823,7 +1823,7 @@ file handling, and TLS config construction used to live in 9vcs's own
 with "usable as a CLI in any environment" and "no default persistent
 daemon.")
 
-## Status (as of 2026-08-23)
+## Status (as of 2026-09-01)
 
 Local-only operation is built and working: `go.mod`, `objstore/patches`
 (patch object model, on-disk CAS, per-file line graph, deterministic
@@ -1881,11 +1881,14 @@ used to say:
   discarding it (v0.4.0), and `Server.MaxConcurrentRequests` (v0.5.0,
   decision #7's per-connection concurrent-request cap) were all found
   missing while building this, specced and reported upstream, fixed
-  there, and adopted here — `go.mod` is on v0.5.0. reconcile's push path
-  trusts `Close`'s returned error directly as of v0.4.0; no read-back
-  verification workaround was needed once it landed. See Status for the
-  full v0.5.0 story, including a real deadlock the spec's own first
-  draft would have introduced, caught before implementation.
+  there, and adopted here — `go.mod` was on v0.5.0 at the time. reconcile's
+  push path trusts `Close`'s returned error directly as of v0.4.0; no
+  read-back verification workaround was needed once it landed. See Status
+  for the full v0.5.0 story, including a real deadlock the spec's own
+  first draft would have introduced, caught before implementation.
+  `go.mod` has since moved to v0.7.0 (v0.6.0's `9pc -net` flag, v0.7.0's
+  `Fid.OpenFile`/`CreateFile` — bumped alongside the `restore` entry
+  below, no 9vcs code changes needed for either).
 
 - Patch encoding: `Patch.Dependencies []Hash` (a real DAG, not a single
   parent), `LineOp{Kind, ID, Prev, Next, Content}` as explicit graph
