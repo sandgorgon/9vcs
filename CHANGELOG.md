@@ -7,6 +7,24 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.5] - 2026-09-01
+
+### Added
+
+- `9vcs restore <path>...` discards uncommitted changes to specific
+  paths, rewriting each from its recorded state at head instead of
+  requiring a whole-tree `checkout` (which refuses outright while
+  anything is dirty). A path with no recorded state — an uncommitted
+  addition, or one half of an uncommitted rename — is removed rather
+  than erroring, so reverting a rename is just naming both paths:
+  `9vcs restore old.txt new.txt`.
+
+### Changed
+
+- Bumped `github.com/sandgorgon/9p` to v0.7.0 (picks up v0.6.0's `9pc
+  -net` flag and v0.7.0's `Fid.OpenFile`/`CreateFile`). No 9vcs code
+  changes needed.
+
 ## [0.1.4] - 2026-08-29
 
 ### Added
