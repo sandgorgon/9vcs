@@ -2350,6 +2350,42 @@ used to say:
   `-p` and `--files` with "selective record isn't supported during an
   in-progress merge," while ordinary whole-tree `record` after resolving
   it worked exactly as before.
+- Per-path `restore` (2026-09-01): before this, discarding uncommitted
+  edits had no dedicated command at all — `checkout` is whole-tree only
+  and outright refuses to run while anything is dirty ("record or
+  discard them first"), so the only way to get one file's original
+  content back was hand-editing it back yourself. `9vcs restore
+  <path>...` fixes that: each named path is written back to its state at
+  head (or, mid-merge, the merged base — same `computeMerge`/materialize
+  split `status`/`record`'s midMerge branch already use), independent of
+  every other path's dirty state.
+  **Not a design change**: reuses `r.Materialize` and
+  `repo.WriteWorkingTree` as-is — no new object-model concept, no
+  staging index (decision #2 still holds: nothing to "unstage"), no
+  rename tracking added anywhere.
+  **A path absent from base — an uncommitted addition, or one half of an
+  uncommitted rename — restores to "doesn't exist" (deleted) rather than
+  erroring.** This is the one place restore's behavior isn't just
+  git's `restore` renamed: git distinguishes untracked-but-known
+  (staged) from genuinely-untracked and refuses the latter, but 9vcs has
+  no staging index for that distinction to live in — every non-ignored
+  working-tree path is already implicitly pending, per decision #2. A
+  path with no base entry at all (never recorded, and not ignored)
+  still errors, since there's nothing — recorded or pending — to act on.
+  This also makes reverting a rename fall out for free with no
+  rename-specific code: naming both paths (`restore old.txt new.txt`)
+  rewrites `old.txt` from base and deletes `new.txt`, exactly the same
+  add/delete pair `WriteWorkingTree`'s old-vs-new diffing already handles
+  for whole-tree checkout.
+  **Verified**: unit tests cover a single-file edit, a two-path rename
+  revert, an uncommitted addition with no base entry (deleted, not
+  errored), a no-op on a path already matching base, and the error path
+  for a name with neither history nor a pending change. Verified live
+  with the real binary too: edit-and-restore round-tripped a file's
+  exact original bytes; `mv b.txt c.txt` followed by `restore b.txt
+  c.txt` left `b.txt` back with its original content and `c.txt` gone;
+  restoring an unknown path printed a clean error instead of a panic or
+  silent no-op.
 
 ## Open items to revisit
 
