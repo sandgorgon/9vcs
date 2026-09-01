@@ -276,6 +276,12 @@ the connection is refused.
 - **Uncommitted changes are in the way** of a `checkout`/`merge`/`apply`
   you wanted to run: `9vcs record` them, or discard by hand
   (`9vcs diff` to see exactly what would be lost first).
+- **Only some paths need discarding**, not the whole tree (`checkout`
+  refuses outright while anything is dirty): `9vcs restore <path>...`
+  rewrites each named path back to its recorded state at head. A path
+  with no recorded state (an uncommitted addition, or one half of an
+  uncommitted rename) is removed rather than erroring, so reverting a
+  rename is just naming both paths: `9vcs restore old.txt new.txt`.
 - **A peer's fingerprint suddenly doesn't match**: don't blindly trust
   it. If you're sure the change is legitimate (they reinstalled, lost
   their key, etc.), re-pin with `-peer-fingerprint <new-hex>` on your
