@@ -7,6 +7,20 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.6] - 2026-09-03
+
+### Fixed
+
+- A same-patch edit that deleted two or more consecutive lines while
+  inserting new content into that same gap left the file's line graph
+  with a structural fork — indistinguishable from an unresolved merge
+  conflict — with no concurrent patch involved at all. `status` then
+  reported the file as permanently modified after every future record,
+  and `diff` rendered an empty `--- / +++` header with nothing under
+  it. See PLAN.md's Status section for the full root-cause writeup and
+  the recovery path for a file already affected by this in existing
+  history.
+
 ## [0.1.5] - 2026-09-01
 
 ### Added
