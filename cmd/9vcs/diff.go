@@ -170,7 +170,21 @@ func renderDiff(path string, base patches.PathState, change patches.FileChange) 
 		}
 		fmt.Printf("Binary files %s and %s differ\n", path, path)
 	default: // KindText
-		if len(change.Ops) == 0 {
+		// OpSever/OpLink (fork-healing ops from patches.Resolve, or now
+		// also from Diff collapsing a same-patch multi-line delete run —
+		// see diff.go's emitGap) carry no visible content of their own;
+		// only Insert/Delete do. Treating a changeset that's entirely
+		// Sever/Link the same as no ops at all avoids printing an empty
+		// "--- / +++" header with nothing under it, which reads as "diff
+		// found no difference" even though the path is genuinely dirty.
+		hasContentOp := false
+		for _, op := range change.Ops {
+			if op.Kind == patches.OpInsert || op.Kind == patches.OpDelete {
+				hasContentOp = true
+				break
+			}
+		}
+		if !hasContentOp {
 			if base.Kind == patches.KindText {
 				printModeChange(path, base.Executable, change.Executable)
 			}
