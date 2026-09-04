@@ -1823,7 +1823,7 @@ file handling, and TLS config construction used to live in 9vcs's own
 with "usable as a CLI in any environment" and "no default persistent
 daemon.")
 
-## Status (as of 2026-09-01)
+## Status (as of 2026-09-03)
 
 Local-only operation is built and working: `go.mod`, `objstore/patches`
 (patch object model, on-disk CAS, per-file line graph, deterministic
@@ -2389,6 +2389,56 @@ used to say:
   c.txt` left `b.txt` back with its original content and `c.txt` gone;
   restoring an unknown path printed a clean error instead of a panic or
   silent no-op.
+- **Line-graph self-fork bug fix (2026-09-03), found live**: recording an
+  edit that deleted two or more consecutive lines while inserting new
+  content into that same gap left the file's line graph with a
+  structural fork — indistinguishable from an unresolved merge conflict
+  — out of a single linear edit with no concurrent patch involved at
+  all. `OpDelete` (`objstore/patches/graph.go`) only ever reconnects
+  around its own immediate neighbor, so a same-patch multi-line delete
+  run leaves one surviving one-hop "shortcut" edge alive from the gap's
+  start; a following `OpInsert` sharing that gap only retracts the
+  *direct* edge it was told about, never a shortcut reached by chaining
+  through dead nodes. Since `ChangedFiles` refuses to call a path clean
+  while its graph has any fork, the affected file showed as permanently
+  modified (`M`) after every future `status`/`record`, no matter what;
+  `9vcs diff` made it worse by rendering an empty `--- / +++` header
+  with nothing under it, since the fork-healing ops `patches.Resolve`
+  appends are `OpSever`/`OpLink`, which the diff renderer didn't handle
+  at all. A second, narrower bug in `Diff`'s LCS reconstruction (matching
+  a common line back to *some* old line with equal content, not the
+  exact index the alignment picked) could fabricate the same kind of
+  fork the moment a file had a duplicate line, even without a multi-line
+  delete run.
+  **Fixed** in `objstore/patches/diff.go`: `lcs` now returns the exact
+  `(oldIdx, newIdx)` pairs the alignment chose instead of just content
+  strings, and `Diff` collapses a same-patch multi-line delete run to a
+  single direct edge (via an explicit `OpSever`+`OpLink` pair) before any
+  insert lands on that gap — exactly mirroring what already happens for
+  granted when only one line is deleted. `cmd/9vcs/diff.go`'s renderer
+  also no longer prints an empty diff header for a changeset that's
+  nothing but `Sever`/`Link` ops.
+  **Not a design change**: no new op kinds — `OpSever`/`OpLink` already
+  existed for `Resolve`'s conflict healing; `Diff` just also reaches for
+  them now.
+  **A real, already-corrupted repo does not self-heal via a plain
+  re-record** — `Resolve`'s healing ops target the fork's *resolved*
+  alive successor, not the actual (possibly multi-hop, chained-through-dead-nodes)
+  edge that produced it, so they don't reach the dangling shortcut this
+  bug leaves behind. The fix only prevents new corruption. The practical
+  recovery for a path already affected: delete it and record that, then
+  re-add it and record again — `Materialize` wipes a path's entire graph
+  object on a `KindDelete`, so the re-add starts a clean line history
+  with content preserved on disk throughout. No repair tooling was built
+  for this, since the workaround is available today.
+  **Verified**: `objstore/patches/diff_test.go` has both the exact
+  hand-traced case (`old=[x,y,z] new=[a,z]`, no duplicate content
+  anywhere) and a 20,000-trial property fuzz test over a 4-symbol
+  alphabet (old/new sequences diffed, replayed onto a fresh graph, and
+  checked for both a fork-free result and byte-for-byte matching
+  content); a 300,000-trial sweep during development found zero
+  mismatches. `cmd/9vcs/record_selffork_test.go` reproduces the bug
+  end-to-end through the same `record`→`status` path a user hits.
 
 ## Open items to revisit
 
