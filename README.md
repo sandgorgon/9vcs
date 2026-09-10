@@ -270,6 +270,29 @@ maintainer's own fingerprint needs an entry in their own
 commands connect exactly like any other peer would, and without one,
 the connection is refused.
 
+## Running under 9sh
+
+Every command normally resolves its repo by walking up from the
+current directory, same as `git`. If you're running inside
+[9sh](https://github.com/sandgorgon/9sh) (a Plan-9-style shell), `-C
+<path>` gives you a second way in: it tries `<path>` against 9sh's own
+namespace first — a relative path under `local` (9sh's real launch
+directory, reachable this way even from a job whose own working
+directory hasn't caught up to a `cd`), an absolute one as given, which
+may resolve to anything else 9sh has bound — before falling back to a
+literal OS path exactly like the no-flag case. `-C` comes before the
+command name:
+
+```
+9vcs -C myrepo log
+9vcs -C myrepo record -m "..."
+```
+
+Everything works the same way through this path — reading, recording,
+checking out branches, symlinks included. Outside a 9sh session (no
+`$_9SH_UNIX_SOCK` set), `-C <path>` is just a plain "run as if started
+in `<path>`", the same idea as `git -C`.
+
 ## Recovering from a mistake
 
 - **Merge/apply went sideways**: `9vcs merge -abort`.
