@@ -12,7 +12,6 @@ import (
 	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
 	"github.com/sandgorgon/9vcs/objstore/patches"
-	"github.com/sandgorgon/9vcs/repo"
 )
 
 // cmdOffer dispatches on args[0] the same style cmdBundle already uses,
@@ -51,7 +50,7 @@ func cmdOfferPost(args []string) error {
 	}
 	addr, refArgs := rest[0], rest[1:]
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}
@@ -164,7 +163,7 @@ func cmdOfferApply(args []string) error {
 	}
 	addr, offerID := rest[0], rest[1]
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

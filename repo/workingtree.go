@@ -3,8 +3,6 @@ package repo
 import (
 	"bytes"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -90,11 +88,14 @@ func JoinLines(lines []patches.Line, trailingNewline bool) string {
 // checkout's dirty-tree check — gets this for free without needing to
 // know whether a merge is in progress.
 func ChangedFiles(r *Repo, base patches.Index) (map[string]patches.FileChange, error) {
+	if r.Tree == nil {
+		return nil, ErrWorkingTreeUnsupported
+	}
 	paths, err := r.WorkingFiles()
 	if err != nil {
 		return nil, err
 	}
-	ignore, err := LoadIgnore(r.Root)
+	ignore, err := LoadIgnore(r.Tree)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", IgnoreFileName, err)
 	}
@@ -109,17 +110,13 @@ func ChangedFiles(r *Repo, base patches.Index) (map[string]patches.FileChange, e
 		if !existed && ignore.matches(p) {
 			continue
 		}
-		full := filepath.Join(r.Root, filepath.FromSlash(p))
-		info, err := os.Lstat(full)
+		info, err := r.Tree.Lstat(p)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", p, err)
 		}
 
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(full)
-			if err != nil {
-				return nil, fmt.Errorf("reading symlink %s: %w", p, err)
-			}
+		if info.IsSymlink {
+			target := info.SymlinkTarget
 			if existed && prior.Kind == patches.KindSymlink && prior.SymlinkTarget == target {
 				continue // unchanged
 			}
@@ -127,8 +124,8 @@ func ChangedFiles(r *Repo, base patches.Index) (map[string]patches.FileChange, e
 			continue
 		}
 
-		executable := info.Mode()&0o111 != 0
-		content, err := os.ReadFile(full)
+		executable := info.Executable
+		content, err := r.Tree.ReadFile(p)
 		if err != nil {
 			return nil, fmt.Errorf("reading %s: %w", p, err)
 		}
@@ -177,56 +174,42 @@ func ChangedFiles(r *Repo, base patches.Index) (map[string]patches.FileChange, e
 // KindText path with unresolved forks is written with inline conflict
 // markers — the presented rendering, not a resolved one.
 //
-// Every file operation goes through an os.Root rooted at r.Root, not a
-// plain filepath.Join followed by a bare os.* call — a real,
-// live-proven vulnerability otherwise: a tracked symlink used as an
-// *intermediate* path component (e.g. a change at "evil" — a symlink
-// pointing outside the repo — plus a second change at
-// "evil/nested/file.txt") causes a plain os.MkdirAll/os.WriteFile to
+// Every file operation goes through r.Tree, not a plain path join
+// followed by a bare filesystem call — a real, live-proven vulnerability
+// otherwise: a tracked symlink used as an *intermediate* path component
+// (e.g. a change at "evil" — a symlink pointing outside the repo — plus
+// a second change at "evil/nested/file.txt") causes a naive write to
 // follow the symlink at the OS level and write completely outside the
 // repo, escaping the earlier fix for literal ".."-style paths entirely
 // (the path string "evil/nested/file.txt" is perfectly canonical — the
 // escape happens via what's *already sitting on disk*, not via the
-// string). os.Root confines every operation to stay under r.Root: it
-// follows a symlink that stays within the root, but refuses one that
-// would leave it (and refuses an absolute-target symlink as an
-// intermediate component outright) — while still allowing an absolute
-// target to be *created* as a leaf symlink (creating one doesn't need
-// to resolve where it points), so a legitimate case like
-// "bin/env -> /usr/bin/env" keeps working. See PLAN.md's "Symlink path
-// traversal via an intermediate component" for the full writeup.
+// string). fsx.Tree confines every operation to stay under the working
+// tree root (see its doc comment for what that guarantee actually is on
+// each backend) — while still allowing an absolute target to be
+// *created* as a leaf symlink (creating one doesn't need to resolve
+// where it points), so a legitimate case like "bin/env -> /usr/bin/env"
+// keeps working. See PLAN.md's "Symlink path traversal via an
+// intermediate component" for the full writeup.
 func WriteWorkingTree(r *Repo, old, new patches.Index) error {
-	root, err := os.OpenRoot(r.Root)
-	if err != nil {
-		return fmt.Errorf("opening working tree root: %w", err)
+	if r.Tree == nil {
+		return ErrWorkingTreeUnsupported
 	}
-	defer root.Close()
+	tree := r.Tree
 
 	for p, st := range new {
-		rel := filepath.FromSlash(p)
-		if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
-			return err
-		}
-
 		if st.Kind == patches.KindSymlink {
-			// A plain Symlink would fail outright if a regular file (or
-			// a stale symlink to something else) already sits here —
-			// clear it first. ENOENT (nothing there yet) is fine.
-			if err := root.Remove(rel); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("clearing %s before creating symlink: %w", p, err)
-			}
-			if err := root.Symlink(st.SymlinkTarget, rel); err != nil {
+			if err := tree.Symlink(p, st.SymlinkTarget); err != nil {
 				return fmt.Errorf("creating symlink %s: %w", p, err)
 			}
 			continue
 		}
 		// If a symlink currently occupies this path and the new content
-		// isn't itself a symlink, remove it first — WriteFile would
-		// otherwise follow it (if it resolves within the root at all;
-		// os.Root refuses it outright if not) and clobber whatever it
-		// points to, instead of replacing the tracked path.
-		if fi, err := root.Lstat(rel); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			if err := root.Remove(rel); err != nil {
+		// isn't itself a symlink, clear it first — WriteFile doesn't
+		// follow a symlink at its own leaf, and would otherwise fail (or,
+		// worse, on a backend that did follow it, clobber whatever it
+		// points to instead of replacing the tracked path).
+		if info, err := tree.Lstat(p); err == nil && info.IsSymlink {
+			if err := tree.Remove(p); err != nil {
 				return fmt.Errorf("removing stale symlink at %s: %w", p, err)
 			}
 		}
@@ -243,29 +226,16 @@ func WriteWorkingTree(r *Repo, old, new patches.Index) error {
 			lines, _ := patches.Linearize(st.Graph)
 			content = []byte(JoinLines(lines, st.TrailingNewline))
 		}
-		mode := os.FileMode(0o644)
-		if st.Executable {
-			mode = 0o755
-		}
-		if err := root.WriteFile(rel, content, mode); err != nil {
-			return err
-		}
-		// WriteFile's mode argument only applies when it actually
-		// creates the file — POSIX open(2) leaves an existing file's
-		// permission bits untouched even with O_CREAT — so an existing
-		// path (the common case: checkout overwriting what's already
-		// there) needs an explicit chmod or a toggled executable bit
-		// would silently fail to take effect.
-		if err := root.Chmod(rel, mode); err != nil {
-			return fmt.Errorf("setting mode for %s: %w", p, err)
+		if err := tree.WriteFile(p, content, st.Executable); err != nil {
+			return fmt.Errorf("writing %s: %w", p, err)
 		}
 	}
 	for p := range old {
 		if _, ok := new[p]; ok {
 			continue
 		}
-		if err := root.Remove(filepath.FromSlash(p)); err != nil && !os.IsNotExist(err) {
-			return err
+		if err := tree.Remove(p); err != nil {
+			return fmt.Errorf("removing %s: %w", p, err)
 		}
 	}
 	return nil

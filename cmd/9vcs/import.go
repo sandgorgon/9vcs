@@ -3,8 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-
-	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdImport(args []string) error {
@@ -23,7 +21,7 @@ func cmdImport(args []string) error {
 		localName = rest[2]
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

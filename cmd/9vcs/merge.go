@@ -22,7 +22,7 @@ func cmdMerge(args []string) error {
 		if len(rest) != 0 {
 			return fmt.Errorf("merge -abort: no other arguments expected")
 		}
-		r, err := repo.Find()
+		r, err := findRepo()
 		if err != nil {
 			return err
 		}
@@ -33,7 +33,7 @@ func cmdMerge(args []string) error {
 		return fmt.Errorf("merge: expected exactly one branch name or patch hash")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

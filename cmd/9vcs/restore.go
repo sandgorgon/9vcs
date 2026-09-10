@@ -33,7 +33,7 @@ func cmdRestore(args []string) error {
 		return fmt.Errorf("restore: expected one or more paths")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}
@@ -41,7 +41,7 @@ func cmdRestore(args []string) error {
 }
 
 // restorePaths is cmdRestore's core, taking r directly rather than going
-// through repo.Find() — same split merge.go uses for cmdMergeAbort, so
+// through findRepo() — same split merge.go uses for cmdMergeAbort, so
 // tests can drive it against a repo.Repo without depending on cwd.
 func restorePaths(r *repo.Repo, paths []string) error {
 	head, _, err := r.HeadHash()
