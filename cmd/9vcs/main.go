@@ -12,47 +12,48 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) < 2 {
+	args := parseRootFlag(os.Args[1:])
+	if len(args) < 1 {
 		usage()
 		os.Exit(2)
 	}
 
 	var err error
-	switch os.Args[1] {
+	switch args[0] {
 	case "init":
-		err = cmdInit(os.Args[2:])
+		err = cmdInit(args[1:])
 	case "record":
-		err = cmdRecord(os.Args[2:])
+		err = cmdRecord(args[1:])
 	case "log":
-		err = cmdLog(os.Args[2:])
+		err = cmdLog(args[1:])
 	case "status":
-		err = cmdStatus(os.Args[2:])
+		err = cmdStatus(args[1:])
 	case "branch":
-		err = cmdBranch(os.Args[2:])
+		err = cmdBranch(args[1:])
 	case "checkout":
-		err = cmdCheckout(os.Args[2:])
+		err = cmdCheckout(args[1:])
 	case "restore":
-		err = cmdRestore(os.Args[2:])
+		err = cmdRestore(args[1:])
 	case "diff":
-		err = cmdDiff(os.Args[2:])
+		err = cmdDiff(args[1:])
 	case "merge":
-		err = cmdMerge(os.Args[2:])
+		err = cmdMerge(args[1:])
 	case "identity":
-		err = cmdIdentity(os.Args[2:])
+		err = cmdIdentity(args[1:])
 	case "config":
-		err = cmdConfig(os.Args[2:])
+		err = cmdConfig(args[1:])
 	case "serve":
-		err = cmdServe(os.Args[2:])
+		err = cmdServe(args[1:])
 	case "import":
-		err = cmdImport(os.Args[2:])
+		err = cmdImport(args[1:])
 	case "reconcile":
-		err = cmdReconcile(os.Args[2:])
+		err = cmdReconcile(args[1:])
 	case "bundle":
-		err = cmdBundle(os.Args[2:])
+		err = cmdBundle(args[1:])
 	case "apply":
-		err = cmdApply(os.Args[2:])
+		err = cmdApply(args[1:])
 	case "offer":
-		err = cmdOffer(os.Args[2:])
+		err = cmdOffer(args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -60,7 +61,7 @@ func main() {
 		fmt.Println("9vcs " + version)
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "9vcs: unknown command %q\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "9vcs: unknown command %q\n", args[0])
 		usage()
 		os.Exit(2)
 	}
@@ -71,8 +72,13 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "usage: 9vcs <command> [arguments]  (9vcs %s)\n", version)
+	fmt.Fprintf(os.Stderr, "usage: 9vcs [-C <path>] <command> [arguments]  (9vcs %s)\n", version)
 	fmt.Fprint(os.Stderr, `
+-C <path>                     resolve <path> as the repo root instead of the current directory —
+                               under a 9sh session ($_9SH_UNIX_SOCK set), <path> is tried against
+                               that shell's namespace first (see PLAN.md decision #9); must come
+                               before the command name
+
 commands:
   init                        initialize a repository in the current directory
   record -m MSG               record a patch from the current working tree changes

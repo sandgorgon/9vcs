@@ -13,7 +13,6 @@ import (
 	"github.com/sandgorgon/9p/server"
 
 	"github.com/sandgorgon/9auth"
-	"github.com/sandgorgon/9vcs/repo"
 	"github.com/sandgorgon/9vcs/vcsfs"
 )
 
@@ -32,7 +31,7 @@ func cmdServe(args []string) error {
 	}
 	addr := rest[0]
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

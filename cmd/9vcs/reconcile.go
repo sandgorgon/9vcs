@@ -8,7 +8,6 @@ import (
 	"github.com/sandgorgon/9p/client"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
-	"github.com/sandgorgon/9vcs/repo"
 )
 
 // cmdReconcile syncs one ref with a peer in whichever direction is safe:
@@ -33,7 +32,7 @@ func cmdReconcile(args []string) error {
 		localName = rest[2]
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

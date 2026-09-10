@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/sandgorgon/9vcs/objstore/patches"
@@ -30,7 +29,7 @@ func cmdRecord(args []string) error {
 		return fmt.Errorf("record: -p can't be combined with -lines/-files")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}
@@ -96,44 +95,34 @@ func cmdRecord(args []string) error {
 	// for why, and for a real order-dependent bug found and fixed the
 	// same day this comment was last touched.
 	//
-	// Reads go through an os.Root confined to r.Root, not a plain
-	// filepath.Join + bare os.* call — same reasoning as
-	// writeWorkingTree's rewrite (see its doc comment): c.Path is
-	// already a validated string (no ".."), but what it actually
-	// resolves to *on disk* could still traverse through an
-	// intermediate symlink component if one happens to be sitting in
-	// the working tree, and this is the one other place in this
-	// codebase that reads working-tree content by path outside
-	// changedFiles (which is safe by construction — see
-	// workingtree.go's changedFiles doc comment).
-	workRoot, err := os.OpenRoot(r.Root)
-	if err != nil {
-		return fmt.Errorf("opening working tree root: %w", err)
-	}
-	defer workRoot.Close()
-
+	// Reads go through r.Tree, not a plain filepath.Join + bare os.*
+	// call — same reasoning as WriteWorkingTree's rewrite (see its doc
+	// comment): c.Path is already a validated string (no ".."), but
+	// what it actually resolves to *on disk* could still traverse
+	// through an intermediate symlink component if one happens to be
+	// sitting in the working tree, and this is the one other place in
+	// this codebase that reads working-tree content by path outside
+	// ChangedFiles (which is safe by construction — see
+	// workingtree.go's ChangedFiles doc comment). r.Tree is guaranteed
+	// non-nil here: ChangedFiles above already returned
+	// repo.ErrWorkingTreeUnsupported if it were nil.
 	for _, c := range mergeConflicts {
 		if c.Kind != "modify/delete" {
 			continue
 		}
-		rel := filepath.FromSlash(c.Path)
-		info, err := workRoot.Lstat(rel)
-		if os.IsNotExist(err) {
-			continue // honoring the deletion; changedFiles' KindDelete already covers it
-		}
+		info, err := r.Tree.Lstat(c.Path)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", c.Path, err)
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := workRoot.Readlink(rel)
-			if err != nil {
-				return fmt.Errorf("reading symlink %s: %w", c.Path, err)
-			}
-			changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindSymlink, SymlinkTarget: target}
+		if !info.Exists {
+			continue // honoring the deletion; changedFiles' KindDelete already covers it
+		}
+		if info.IsSymlink {
+			changes[c.Path] = patches.FileChange{Path: c.Path, Kind: patches.KindSymlink, SymlinkTarget: info.SymlinkTarget}
 			continue
 		}
-		executable := info.Mode()&0o111 != 0
-		content, err := workRoot.ReadFile(rel)
+		executable := info.Executable
+		content, err := r.Tree.ReadFile(c.Path)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", c.Path, err)
 		}

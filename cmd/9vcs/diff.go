@@ -12,7 +12,7 @@ func cmdDiff(args []string) error {
 		return fmt.Errorf("diff: too many arguments (expected [<ref>] or [<ref> <ref>])")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

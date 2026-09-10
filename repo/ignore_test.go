@@ -4,10 +4,21 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/sandgorgon/9vcs/fsx"
 )
 
+func newTestTree(t *testing.T, root string) fsx.Tree {
+	t.Helper()
+	tree, err := fsx.NewOSTree(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tree
+}
+
 func TestLoadIgnoreMissingFileIsNoPatterns(t *testing.T) {
-	m, err := LoadIgnore(t.TempDir())
+	m, err := LoadIgnore(newTestTree(t, t.TempDir()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +40,7 @@ func writeIgnoreFileForTest(t *testing.T, root, content string) {
 func TestLoadIgnoreSkipsBlankLinesAndComments(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFileForTest(t, root, "\n# a comment\n   \n*.log\n# another\n")
-	m, err := LoadIgnore(root)
+	m, err := LoadIgnore(newTestTree(t, root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +52,7 @@ func TestLoadIgnoreSkipsBlankLinesAndComments(t *testing.T) {
 func TestIgnoreBasenameGlobMatchesAtAnyDepth(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFileForTest(t, root, "*.log\n")
-	m, err := LoadIgnore(root)
+	m, err := LoadIgnore(newTestTree(t, root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +69,7 @@ func TestIgnoreBasenameGlobMatchesAtAnyDepth(t *testing.T) {
 func TestIgnoreAnchoredPatternMatchesOnlyAtRoot(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFileForTest(t, root, "/build\n")
-	m, err := LoadIgnore(root)
+	m, err := LoadIgnore(newTestTree(t, root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +84,7 @@ func TestIgnoreAnchoredPatternMatchesOnlyAtRoot(t *testing.T) {
 func TestIgnoreDirOnlyPatternSkipsWholeSubtreeNotFilesOfTheSameName(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFileForTest(t, root, "node_modules/\n")
-	m, err := LoadIgnore(root)
+	m, err := LoadIgnore(newTestTree(t, root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +105,7 @@ func TestIgnoreDirOnlyPatternSkipsWholeSubtreeNotFilesOfTheSameName(t *testing.T
 func TestIgnoreSlashAnchoredPatternWithGlob(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFileForTest(t, root, "src/gen/*.go\n")
-	m, err := LoadIgnore(root)
+	m, err := LoadIgnore(newTestTree(t, root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +129,7 @@ func TestIgnoreSlashAnchoredPatternWithGlob(t *testing.T) {
 func TestIgnorePatternWithoutTrailingSlashStillCoversDirectoryContents(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFileForTest(t, root, "/build\n")
-	m, err := LoadIgnore(root)
+	m, err := LoadIgnore(newTestTree(t, root))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +144,7 @@ func TestIgnorePatternWithoutTrailingSlashStillCoversDirectoryContents(t *testin
 func TestLoadIgnoreBadPatternIsALoudError(t *testing.T) {
 	root := t.TempDir()
 	writeIgnoreFileForTest(t, root, "[unterminated\n")
-	if _, err := LoadIgnore(root); err == nil {
+	if _, err := LoadIgnore(newTestTree(t, root)); err == nil {
 		t.Error("expected a malformed pattern to be reported at load time, got nil")
 	}
 }

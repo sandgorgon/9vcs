@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandgorgon/9vcs/fsx"
 	"github.com/sandgorgon/9vcs/objstore/patches"
 	"github.com/sandgorgon/9vcs/synth"
 )
@@ -29,8 +30,10 @@ const DefaultBranch = "main"
 
 // Repo resolves the paths and stores for one 9vcs repository.
 type Repo struct {
-	Root   string // working tree root (parent of .9vcs)
-	Dir    string // .9vcs
+	FS     fsx.FS   // ref/HEAD/lock and patch/blob storage — see PLAN.md decision #9
+	Tree   fsx.Tree // working-tree materialization — nil if unavailable, see ErrWorkingTreeUnsupported
+	Root   string   // working tree root (parent of .9vcs), in FS's own path convention
+	Dir    string   // .9vcs, in FS's own path convention
 	Store  *patches.Store
 	Blobs  *patches.BlobStore
 	Offers *patches.BlobStore // pending offer bundles received via `9vcs serve`'s /offers — see PLAN.md decision #8
@@ -39,8 +42,18 @@ type Repo struct {
 
 var ErrNotARepo = errors.New("not a 9vcs repository (or any parent directory)")
 
+// ErrWorkingTreeUnsupported marks a working-tree-materialization call
+// (WriteSidecarFile/RemoveSidecarFile/WorkingFiles) refusing because
+// r.Tree is nil — reached only via OpenFS called directly with a
+// non-local FS and no Tree (FindAt, the normal namespace-resolved
+// entry point, always builds a real one — see openFSAt).
+var ErrWorkingTreeUnsupported = errors.New("repo: working-tree operations aren't available for this repo — see PLAN.md decision #9")
+
 // Find walks up from the current directory looking for .9vcs, the same
-// way git walks up looking for .git.
+// way git walks up looking for .git. Always resolves against the real
+// OS filesystem — see PLAN.md decision #9: the implicit, no-argument
+// case is deliberately untouched by namespace-first resolution; use
+// FindAt (reached via the CLI's -C flag) for that.
 func Find() (*Repo, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -60,21 +73,55 @@ func Find() (*Repo, error) {
 	}
 }
 
+// Open returns the Repo rooted at root on the real OS filesystem.
 func Open(root string) (*Repo, error) {
-	dir := filepath.Join(root, DotDir)
-	store, err := patches.Open(filepath.Join(dir, "patches"))
+	return OpenFS(fsx.NewOS(""), root)
+}
+
+// OpenFS returns the Repo rooted at root within fs — see PLAN.md
+// decision #9. Tree (working-tree materialization) is built too when
+// fs is local (osfs); a non-local fs opened directly through this
+// function (rather than FindAt, which has the extra connection state
+// needed to build a real p9Tree — see openFSAt) gets a nil Tree, and
+// working-tree operations return ErrWorkingTreeUnsupported.
+func OpenFS(fs fsx.FS, root string) (*Repo, error) {
+	dir := fs.Join(root, DotDir)
+	store, err := patches.OpenFS(fs, fs.Join(dir, "patches"))
 	if err != nil {
 		return nil, err
 	}
-	blobs, err := patches.OpenBlobs(filepath.Join(dir, "blobs"))
+	blobs, err := patches.OpenBlobsFS(fs, fs.Join(dir, "blobs"))
 	if err != nil {
 		return nil, err
 	}
-	offers, err := patches.OpenBlobs(filepath.Join(dir, "offers"))
+	offers, err := patches.OpenBlobsFS(fs, fs.Join(dir, "offers"))
 	if err != nil {
 		return nil, err
 	}
-	return &Repo{Root: root, Dir: dir, Store: store, Blobs: blobs, Offers: offers, cache: synth.NewCache(store)}, nil
+	r := &Repo{FS: fs, Root: root, Dir: dir, Store: store, Blobs: blobs, Offers: offers, cache: synth.NewCache(store)}
+	if fs.IsLocal() {
+		tree, err := fsx.NewOSTree(root)
+		if err != nil {
+			return nil, err
+		}
+		r.Tree = tree
+	}
+	return r, nil
+}
+
+// openFSAt is OpenFS plus building a real Tree from nc when the root
+// resolved through the namespace (nc != nil) — FindAt's entry point,
+// separate from the public OpenFS because only namespace resolution
+// has the underlying *client.Client/root Fid a p9Tree needs.
+func openFSAt(fs fsx.FS, nc *namespaceConn, root string) (*Repo, error) {
+	r, err := OpenFS(fs, root)
+	if err != nil {
+		return nil, err
+	}
+	if nc != nil {
+		r.Tree = fsx.NewP9Tree(nc.c, nc.root, root)
+	}
+	return r, nil
 }
 
 // Materialize is patches.Materialize(r.Store, roots...), memoized for
@@ -89,7 +136,7 @@ func (r *Repo) Materialize(roots ...patches.Hash) (patches.Index, error) {
 
 // refLockPath is the cross-process advisory lock every ref/HEAD mutation
 // takes for its critical section — see withRefLock.
-func (r *Repo) refLockPath() string { return filepath.Join(r.Dir, "lock") }
+func (r *Repo) refLockPath() string { return r.FS.Join(r.Dir, "lock") }
 
 const (
 	// refLockAcquireTimeout bounds how long withRefLock waits for a
@@ -115,23 +162,25 @@ const (
 // `serve`'s incoming push, are different OS processes with no shared
 // memory to synchronize through at all. Go's stdlib has no flock
 // primitive, and this project stays stdlib-only (see PLAN.md), so this
-// uses os.O_EXCL as the actual mutex primitive instead: atomically
+// uses fsx.FS.Lock as the actual mutex primitive instead: atomically
 // creating the lock file is the acquire, removing it is the release —
-// same shape as many tools' simple lockfile convention.
+// same shape as many tools' simple lockfile convention. Works
+// identically over a p9fs-backed Repo since github.com/sandgorgon/9p
+// v0.8.0 (see PLAN.md decision #9): Lock is true exclusive-create on
+// either backend.
 func (r *Repo) withRefLock(fn func() error) error {
 	path := r.refLockPath()
 	deadline := time.Now().Add(refLockAcquireTimeout)
 	for {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		err := r.FS.Lock(path)
 		if err == nil {
-			f.Close()
 			break
 		}
-		if !os.IsExist(err) {
+		if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("acquiring ref lock: %w", err)
 		}
-		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > refLockStaleAge {
-			os.Remove(path) // best-effort: if another stealer wins this race, the next loop iteration's OpenFile sorts it out
+		if info, statErr := r.FS.Stat(path); statErr == nil && info.Exists && time.Since(info.ModTime) > refLockStaleAge {
+			r.FS.Remove(path) // best-effort: if another stealer wins this race, the next loop iteration's Lock sorts it out
 			continue
 		}
 		if time.Now().After(deadline) {
@@ -139,31 +188,17 @@ func (r *Repo) withRefLock(fn func() error) error {
 		}
 		time.Sleep(refLockRetryInterval)
 	}
-	defer os.Remove(path)
+	defer r.FS.Remove(path)
 	return fn()
 }
 
-// atomicWriteFile writes data to path via a temp file in the same
-// directory, then renames it into place — matching
-// objstore/patches/rawstore.go's rawStore.put: a reader (or a crash
-// mid-write) never observes a partially-written file, only the old
-// content or the new content, in full, never a mix. Plain os.WriteFile
-// (what every ref/HEAD write used before) offers no such guarantee.
-func atomicWriteFile(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
+func (r *Repo) headFile() string { return r.FS.Join(r.Dir, "HEAD") }
 
-func (r *Repo) headFile() string { return filepath.Join(r.Dir, "HEAD") }
-
-func (r *Repo) refPath(name string) string { return filepath.Join(r.Dir, "refs", name) }
+func (r *Repo) refPath(name string) string { return r.FS.Join(r.Dir, "refs", name) }
 
 // ValidRefName mirrors objstore/patches' FileChange.Path validation —
 // same shape, same reason: refPath joins name straight onto r.Dir via
-// filepath.Join, and nested branch names are a real, intentional feature
+// fs.Join, and nested branch names are a real, intentional feature
 // (writeRefFileLocked's MkdirAll), so name can't just be rejected for
 // containing "/" — only a ".." segment (or an absolute/empty name) makes
 // it dangerous.
@@ -198,10 +233,28 @@ func ValidRefName(name string) bool {
 	return true
 }
 
+// readFileOrAbsent reads path via r.FS, returning (nil, false, nil) if
+// it doesn't exist and (nil, false, err) for any other failure.
+// Existence is checked via Stat rather than matching ReadFile's error
+// against os.ErrNotExist directly, because base 9P2000 has no
+// structured error code to do that reliably over a p9fs-backed repo
+// (see PLAN.md's library facts) — fsx.FS.Stat already handles this
+// correctly for either backend.
+func (r *Repo) readFileOrAbsent(path string) ([]byte, bool, error) {
+	data, err := r.FS.ReadFile(path)
+	if err == nil {
+		return data, true, nil
+	}
+	if info, statErr := r.FS.Stat(path); statErr == nil && !info.Exists {
+		return nil, false, nil
+	}
+	return nil, false, err
+}
+
 // CurrentBranch returns the branch name HEAD points to, or "" if HEAD is
 // detached (points directly at a patch hash instead of a branch name).
 func (r *Repo) CurrentBranch() (string, error) {
-	data, err := os.ReadFile(r.headFile())
+	data, err := r.FS.ReadFile(r.headFile())
 	if err != nil {
 		return "", err
 	}
@@ -214,13 +267,13 @@ func (r *Repo) CurrentBranch() (string, error) {
 
 func (r *Repo) SetHeadBranch(name string) error {
 	return r.withRefLock(func() error {
-		return atomicWriteFile(r.headFile(), []byte("ref: "+name+"\n"))
+		return r.FS.WriteAtomic(r.headFile(), []byte("ref: "+name+"\n"))
 	})
 }
 
 func (r *Repo) SetHeadDetached(h patches.Hash) error {
 	return r.withRefLock(func() error {
-		return atomicWriteFile(r.headFile(), []byte(h.String()+"\n"))
+		return r.FS.WriteAtomic(r.headFile(), []byte(h.String()+"\n"))
 	})
 }
 
@@ -232,7 +285,7 @@ func (r *Repo) HeadHash() (patches.Hash, bool, error) {
 		return patches.Hash{}, false, err
 	}
 	if branch == "" {
-		data, err := os.ReadFile(r.headFile())
+		data, err := r.FS.ReadFile(r.headFile())
 		if err != nil {
 			return patches.Hash{}, false, err
 		}
@@ -247,11 +300,8 @@ func (r *Repo) RefHash(name string) (patches.Hash, bool, error) {
 	if !ValidRefName(name) {
 		return patches.Hash{}, false, fmt.Errorf("invalid ref name %q", name)
 	}
-	data, err := os.ReadFile(r.refPath(name))
-	if errors.Is(err, os.ErrNotExist) {
-		return patches.Hash{}, false, nil
-	}
-	if err != nil {
+	data, ok, err := r.readFileOrAbsent(r.refPath(name))
+	if err != nil || !ok {
 		return patches.Hash{}, false, err
 	}
 	h, err := patches.HashFromHex(strings.TrimSpace(string(data)))
@@ -267,10 +317,10 @@ func (r *Repo) RefHash(name string) (patches.Hash, bool, error) {
 // compare-then-write sequence runs under a single lock acquisition, not
 // two nested ones.
 func (r *Repo) writeRefFileLocked(name string, h patches.Hash) error {
-	if err := os.MkdirAll(filepath.Dir(r.refPath(name)), 0o755); err != nil {
+	if err := r.FS.MkdirAll(r.FS.Dir(r.refPath(name))); err != nil {
 		return err
 	}
-	return atomicWriteFile(r.refPath(name), []byte(h.String()+"\n"))
+	return r.FS.WriteAtomic(r.refPath(name), []byte(h.String()+"\n"))
 }
 
 // ErrRefConflict marks a CAS ref-write failure: the caller's view of the
@@ -348,7 +398,7 @@ func (r *Repo) casWriteRef(name string, old, new patches.Hash, refuseCheckedOutB
 	})
 }
 
-func (r *Repo) mergeHeadFile() string { return filepath.Join(r.Dir, "MERGE_HEAD") }
+func (r *Repo) mergeHeadFile() string { return r.FS.Join(r.Dir, "MERGE_HEAD") }
 
 // MergeHeads reads the in-progress merge's other side(s), if any — one
 // hash per line, the same MERGE_HEAD format git itself uses (which
@@ -358,11 +408,8 @@ func (r *Repo) mergeHeadFile() string { return filepath.Join(r.Dir, "MERGE_HEAD"
 // merge rather than requiring changes. A nil/empty result means no merge
 // is in progress.
 func (r *Repo) MergeHeads() ([]patches.Hash, error) {
-	data, err := os.ReadFile(r.mergeHeadFile())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	data, ok, err := r.readFileOrAbsent(r.mergeHeadFile())
+	if err != nil || !ok {
 		return nil, err
 	}
 	var heads []patches.Hash
@@ -382,8 +429,8 @@ func (r *Repo) MergeHeads() ([]patches.Hash, error) {
 
 // SetMergeHeads writes heads, one per line, replacing whatever
 // MERGE_HEAD held before. Atomic (temp file + rename) and lock-protected,
-// same as every other ref/HEAD write (see atomicWriteFile/withRefLock) —
-// a plain os.WriteFile here, unlike everywhere else, would let a crash
+// same as every other ref/HEAD write (see WriteAtomic/withRefLock) —
+// a plain write here, unlike everywhere else, would let a crash
 // mid-write leave a truncated MERGE_HEAD that HashFromHex then errors on
 // for every subsequent command until manually removed, and would let a
 // concurrent writer's bytes interleave with this one's.
@@ -394,21 +441,17 @@ func (r *Repo) SetMergeHeads(heads []patches.Hash) error {
 		b.WriteString("\n")
 	}
 	return r.withRefLock(func() error {
-		return atomicWriteFile(r.mergeHeadFile(), []byte(b.String()))
+		return r.FS.WriteAtomic(r.mergeHeadFile(), []byte(b.String()))
 	})
 }
 
 func (r *Repo) ClearMergeHeads() error {
 	return r.withRefLock(func() error {
-		err := os.Remove(r.mergeHeadFile())
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
+		return r.FS.Remove(r.mergeHeadFile())
 	})
 }
 
-func (r *Repo) mergeSidecarsFile() string { return filepath.Join(r.Dir, "MERGE_SIDECARS") }
+func (r *Repo) mergeSidecarsFile() string { return r.FS.Join(r.Dir, "MERGE_SIDECARS") }
 
 // BinaryConflictSidecar is the path merge/apply writes a losing side's
 // content to, alongside a binary conflict — e.g. "logo.png.a1b2c3d4e5f6"
@@ -422,40 +465,32 @@ func BinaryConflictSidecar(path string, side patches.Hash) string {
 	return path + "." + side.String()[:12]
 }
 
-// WriteSidecarFile writes a binary-conflict comparison sidecar's content,
-// confined to r.Root via os.Root — the same real, live-proven bug class
-// WriteWorkingTree was fixed for (see its doc comment): sidecar's path
-// string is a legitimate join of an already-validated tracked path plus a
-// hash suffix, but a plain filepath.Join+os.WriteFile still follows
-// whatever's *already on disk* at an intermediate path component. A
-// symlink there — planted by an earlier, unrelated, already-recorded
-// commit, or simply pre-existing in the victim's working tree (e.g. a
-// symlinked vendor/ or build-cache dir) — sends this write straight
-// outside the repo. os.Root refuses that the same way it does for
-// WriteWorkingTree.
+// WriteSidecarFile writes a binary-conflict comparison sidecar's
+// content, through r.Tree — confined to the working tree root the
+// same way every other Tree operation is (see fsx.Tree's doc
+// comment): sidecar's path string is a legitimate join of an
+// already-validated tracked path plus a hash suffix, but a naive
+// write would still follow whatever's *already on disk* at an
+// intermediate path component. A symlink there — planted by an
+// earlier, unrelated, already-recorded commit, or simply pre-existing
+// in the victim's working tree (e.g. a symlinked vendor/ or
+// build-cache dir) — would otherwise send this write straight outside
+// the repo; this is the exact live bug class WriteWorkingTree's own
+// doc comment describes.
 func WriteSidecarFile(r *Repo, sidecar string, data []byte) error {
-	root, err := os.OpenRoot(r.Root)
-	if err != nil {
-		return err
+	if r.Tree == nil {
+		return ErrWorkingTreeUnsupported
 	}
-	defer root.Close()
-	rel := filepath.FromSlash(sidecar)
-	if err := root.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
-		return err
-	}
-	return root.WriteFile(rel, data, 0o644)
+	return r.Tree.WriteFile(sidecar, data, false)
 }
 
-// RemoveSidecarFile removes a sidecar written by WriteSidecarFile, same
-// os.Root confinement as the write side. Mirrors plain os.Remove's
-// ErrNotExist-is-fine contract that callers already relied on.
+// RemoveSidecarFile removes a sidecar written by WriteSidecarFile,
+// same confinement. Idempotent, like every other Tree.Remove call.
 func RemoveSidecarFile(r *Repo, sidecar string) error {
-	root, err := os.OpenRoot(r.Root)
-	if err != nil {
-		return err
+	if r.Tree == nil {
+		return ErrWorkingTreeUnsupported
 	}
-	defer root.Close()
-	return root.Remove(filepath.FromSlash(sidecar))
+	return r.Tree.Remove(sidecar)
 }
 
 // SetMergeSidecars records every sidecar path merge wrote, so record knows
@@ -467,16 +502,13 @@ func (r *Repo) SetMergeSidecars(paths []string) error {
 		return nil
 	}
 	return r.withRefLock(func() error {
-		return atomicWriteFile(r.mergeSidecarsFile(), []byte(strings.Join(paths, "\n")+"\n"))
+		return r.FS.WriteAtomic(r.mergeSidecarsFile(), []byte(strings.Join(paths, "\n")+"\n"))
 	})
 }
 
 func (r *Repo) MergeSidecars() ([]string, error) {
-	data, err := os.ReadFile(r.mergeSidecarsFile())
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
+	data, ok, err := r.readFileOrAbsent(r.mergeSidecarsFile())
+	if err != nil || !ok {
 		return nil, err
 	}
 	var out []string
@@ -490,15 +522,11 @@ func (r *Repo) MergeSidecars() ([]string, error) {
 
 func (r *Repo) ClearMergeSidecars() error {
 	return r.withRefLock(func() error {
-		err := os.Remove(r.mergeSidecarsFile())
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
+		return r.FS.Remove(r.mergeSidecarsFile())
 	})
 }
 
-func (r *Repo) AuthorizedPeersFile() string { return filepath.Join(r.Dir, "authorized-peers") }
+func (r *Repo) AuthorizedPeersFile() string { return r.FS.Join(r.Dir, "authorized-peers") }
 
 // ListRefs returns every branch name with a ref file, sorted. Named to
 // match vcsfs.RefReader's method exactly, alongside RefHash/SetRefHash,
@@ -506,18 +534,9 @@ func (r *Repo) AuthorizedPeersFile() string { return filepath.Join(r.Dir, "autho
 // import this package (that would be backwards), but Go interfaces are
 // satisfied structurally, so no adapter type is needed.
 func (r *Repo) ListRefs() ([]string, error) {
-	entries, err := os.ReadDir(filepath.Join(r.Dir, "refs"))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	names, err := r.FS.ReadDir(r.FS.Join(r.Dir, "refs"))
 	if err != nil {
 		return nil, err
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			names = append(names, e.Name())
-		}
 	}
 	sort.Strings(names)
 	return names, nil
@@ -539,35 +558,43 @@ func (r *Repo) ResolveRef(arg string) (patches.Hash, error) {
 }
 
 // WorkingFiles walks the working tree, returning repo-relative paths for
-// every regular file or symlink outside .9vcs. WalkDir doesn't follow a
-// symlink to see what it points at (a symlink-to-directory is reported
-// as a plain leaf entry, never descended into), so no special handling
-// is needed there — this just has to stop excluding symlink entries
-// outright the way it used to.
+// every regular file or symlink outside .9vcs, via r.Tree — backend-
+// agnostic (osTree or p9Tree, see fsx.Tree). A symlink is never
+// descended into, tracked-directory-or-not: TreeInfo.IsDir and
+// IsSymlink are mutually exclusive by construction on both backends
+// (Lstat-based, not Stat-based), so a symlink is always reported as a
+// leaf entry, matching how git/every other caller here treats one.
 func (r *Repo) WorkingFiles() ([]string, error) {
+	if r.Tree == nil {
+		return nil, ErrWorkingTreeUnsupported
+	}
 	var out []string
-	err := filepath.WalkDir(r.Root, func(path string, d os.DirEntry, err error) error {
+	var walk func(dir string) error
+	walk = func(dir string) error {
+		entries, err := r.Tree.ReadDir(dir)
 		if err != nil {
 			return err
 		}
-		rel, err := filepath.Rel(r.Root, path)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if d.IsDir() {
-			if d.Name() == DotDir {
-				return filepath.SkipDir
+		for _, e := range entries {
+			if e.Name == DotDir && e.Info.IsDir {
+				continue
 			}
-			return nil
+			rel := e.Name
+			if dir != "" {
+				rel = dir + "/" + e.Name
+			}
+			if e.Info.IsDir {
+				if err := walk(rel); err != nil {
+					return err
+				}
+				continue
+			}
+			out = append(out, rel)
 		}
-		if !d.Type().IsRegular() && d.Type()&os.ModeSymlink == 0 {
-			return nil
-		}
-		out = append(out, filepath.ToSlash(rel))
 		return nil
-	})
-	return out, err
+	}
+	if err := walk(""); err != nil {
+		return nil, err
+	}
+	return out, nil
 }

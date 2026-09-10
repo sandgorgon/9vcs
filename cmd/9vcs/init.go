@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/sandgorgon/9vcs/repo"
 )
@@ -12,19 +10,22 @@ func cmdInit(args []string) error {
 	if len(args) != 0 {
 		return fmt.Errorf("init takes no arguments")
 	}
-	cwd, err := os.Getwd()
+	fs, dir, err := resolveRoot()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Join(cwd, repo.DotDir)
-	if _, err := os.Stat(dir); err == nil {
-		return fmt.Errorf("%s already exists", dir)
+	dotDir := fs.Join(dir, repo.DotDir)
+	if info, err := fs.Stat(dotDir); err == nil && info.Exists {
+		return fmt.Errorf("%s already exists", dotDir)
 	}
-	if err := os.MkdirAll(filepath.Join(dir, "refs"), 0o755); err != nil {
+	// A missing directory over a namespace-resolved (p9fs) root fails
+	// here with a clear error naming the blocking 9p issue — see
+	// PLAN.md decision #9 and fsx.ErrWriteUnsupported's own message.
+	if err := fs.MkdirAll(fs.Join(dotDir, "refs")); err != nil {
 		return err
 	}
 
-	r, err := repo.Open(cwd)
+	r, err := repo.OpenFS(fs, dir)
 	if err != nil {
 		return err
 	}
@@ -32,6 +33,6 @@ func cmdInit(args []string) error {
 		return err
 	}
 
-	fmt.Printf("initialized empty 9vcs repository in %s\n", dir)
+	fmt.Printf("initialized empty 9vcs repository in %s\n", dotDir)
 	return nil
 }

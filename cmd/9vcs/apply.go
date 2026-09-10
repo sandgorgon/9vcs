@@ -27,7 +27,7 @@ func cmdApply(args []string) error {
 		return fmt.Errorf("apply: expected at least one <patch-hash-or-ref>")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

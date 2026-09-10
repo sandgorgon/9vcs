@@ -1,6 +1,10 @@
 package patches
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sandgorgon/9vcs/fsx"
+)
 
 // Store is a content-addressed store of patch objects under one directory
 // (repo-relative: .9vcs/patches). Objects are immutable and durable on
@@ -9,9 +13,16 @@ type Store struct {
 	raw *rawStore
 }
 
-// Open returns a Store rooted at dir, creating it if necessary.
+// Open returns a Store rooted at dir on the real OS filesystem,
+// creating it if necessary.
 func Open(dir string) (*Store, error) {
-	raw, err := openRaw(dir)
+	return OpenFS(fsx.NewOS(""), dir)
+}
+
+// OpenFS returns a Store rooted at dir within fs — see PLAN.md
+// decision #9.
+func OpenFS(fs fsx.FS, dir string) (*Store, error) {
+	raw, err := openRaw(fs, dir)
 	if err != nil {
 		return nil, err
 	}

@@ -1,5 +1,7 @@
 package patches
 
+import "github.com/sandgorgon/9vcs/fsx"
+
 // BlobStore is a content-addressed store of whole-file content, for paths
 // that go through KindBlob changes instead of the line graph — see the
 // ChangeKind doc comment. Same on-disk shape as Store, different payload:
@@ -8,9 +10,16 @@ type BlobStore struct {
 	raw *rawStore
 }
 
-// OpenBlobs returns a BlobStore rooted at dir, creating it if necessary.
+// OpenBlobs returns a BlobStore rooted at dir on the real OS
+// filesystem, creating it if necessary.
 func OpenBlobs(dir string) (*BlobStore, error) {
-	raw, err := openRaw(dir)
+	return OpenBlobsFS(fsx.NewOS(""), dir)
+}
+
+// OpenBlobsFS returns a BlobStore rooted at dir within fs — see
+// PLAN.md decision #9.
+func OpenBlobsFS(fs fsx.FS, dir string) (*BlobStore, error) {
+	raw, err := openRaw(fs, dir)
 	if err != nil {
 		return nil, err
 	}

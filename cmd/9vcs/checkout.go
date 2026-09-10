@@ -27,7 +27,7 @@ func cmdCheckout(args []string) error {
 	}
 	name := rest[0]
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

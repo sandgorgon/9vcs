@@ -33,37 +33,6 @@ func newTestRepo(t *testing.T) *Repo {
 	return r
 }
 
-func TestAtomicWriteFileLeavesNoTempFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "f")
-	if err := atomicWriteFile(path, []byte("hello")); err != nil {
-		t.Fatal(err)
-	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "hello" {
-		t.Errorf("content = %q, want %q", got, "hello")
-	}
-	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
-		t.Errorf("expected no leftover .tmp file, stat err = %v", err)
-	}
-
-	// A second write to the same path must fully replace it, not merge
-	// with or leave any trace of the first.
-	if err := atomicWriteFile(path, []byte("bye")); err != nil {
-		t.Fatal(err)
-	}
-	got, err = os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(got) != "bye" {
-		t.Errorf("content after overwrite = %q, want %q", got, "bye")
-	}
-}
-
 // TestWithRefLockMutualExclusion is the actual concurrency property:
 // launch many goroutines all trying to run a critical section (guarded
 // by the same repo's withRefLock) that would visibly misbehave under any

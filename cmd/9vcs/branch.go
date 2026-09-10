@@ -8,7 +8,7 @@ import (
 )
 
 func cmdBranch(args []string) error {
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

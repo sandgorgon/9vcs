@@ -7,7 +7,6 @@ import (
 
 	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/objstore/patches"
-	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdLog(args []string) error {
@@ -20,7 +19,7 @@ func cmdLog(args []string) error {
 		return fmt.Errorf("log: too many arguments (expected [<ref>])")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

@@ -182,7 +182,7 @@ func setConfigValue(global bool, key, value string) error {
 		path, err = globalConfigPath()
 	} else {
 		var r *repo.Repo
-		r, err = repo.Find()
+		r, err = findRepo()
 		if err == nil {
 			path = repoConfigPath(r)
 		}
@@ -218,7 +218,7 @@ func getConfigValue(global bool, key string) error {
 		}
 	} else {
 		var r *repo.Repo
-		r, err = repo.Find()
+		r, err = findRepo()
 		if err == nil {
 			value, err = resolvedAuthorField(r, key)
 		}

@@ -2,12 +2,12 @@ package repo
 
 import (
 	"bufio"
-	"errors"
+	"bytes"
 	"fmt"
-	"os"
 	"path"
-	"path/filepath"
 	"strings"
+
+	"github.com/sandgorgon/9vcs/fsx"
 )
 
 // IgnoreFileName lives at the repo root, alongside tracked files — unlike
@@ -25,22 +25,25 @@ type ignorePattern struct {
 	dirOnly  bool     // trailing "/" in the source line: the match must land on a real ancestor directory, never the final filename
 }
 
-// LoadIgnore reads .9vcsignore at root. A missing file means no patterns —
-// the same "missing file is not an error" convention every other flat
-// text file in this codebase already uses (authorized-peers, known-peers,
-// 9vcs config).
-func LoadIgnore(root string) (ignoreMatcher, error) {
-	f, err := os.Open(filepath.Join(root, IgnoreFileName))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+// LoadIgnore reads .9vcsignore from tree's root. A missing file means
+// no patterns — the same "missing file is not an error" convention
+// every other flat text file in this codebase already uses
+// (authorized-peers, known-peers, 9vcs config).
+func LoadIgnore(tree fsx.Tree) (ignoreMatcher, error) {
+	info, err := tree.Lstat(IgnoreFileName)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	if !info.Exists {
+		return nil, nil
+	}
+	data, err := tree.ReadFile(IgnoreFileName)
+	if err != nil {
+		return nil, err
+	}
 
 	var out ignoreMatcher
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for lineNo := 1; scanner.Scan(); lineNo++ {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {

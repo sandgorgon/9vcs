@@ -8,7 +8,6 @@ import (
 	"github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/9vcs/bundle"
 	"github.com/sandgorgon/9vcs/objstore/patches"
-	"github.com/sandgorgon/9vcs/repo"
 )
 
 func cmdBundle(args []string) error {
@@ -42,7 +41,7 @@ func cmdBundleExport(args []string) error {
 		return fmt.Errorf("bundle export: -o <file> is required")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}
@@ -98,7 +97,7 @@ func cmdBundleImport(args []string) error {
 		return fmt.Errorf("bundle import: usage: 9vcs bundle import <file>")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}

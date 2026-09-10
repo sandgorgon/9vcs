@@ -24,7 +24,7 @@ func cmdStatus(args []string) error {
 		return fmt.Errorf("status: expected no arguments")
 	}
 
-	r, err := repo.Find()
+	r, err := findRepo()
 	if err != nil {
 		return err
 	}
