@@ -7,6 +7,40 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.7] - 2026-09-09
+
+### Added
+
+- A `-C <path>` flag, checked before every command resolves its repo:
+  under a [9sh](https://github.com/sandgorgon/9sh) session
+  (`$_9SH_UNIX_SOCK` set), `<path>` is tried against that shell's own
+  namespace first — a relative path rooted at `local` (9sh's real
+  launch directory), an absolute one as given, which may resolve to
+  anything else 9sh has bound — before falling back to a literal OS
+  path exactly like the no-flag case (`repo.Find()` itself is
+  untouched). Storage and working-tree materialization both work fully
+  over this path, symlinks included — see PLAN.md decision #9 for the
+  full design, including one documented residual limitation (a
+  namespace-resolved write is confined to wherever 9sh bound the
+  region, not the specific repo within it).
+
+### Changed
+
+- Bumped `github.com/sandgorgon/9p` to v0.9.0. Two real gaps surfaced
+  while building the above, both filed and fixed upstream:
+  `client.File` couldn't rename or remove a file it held (blocking a
+  safe atomic ref/HEAD write or lock release over 9P), and
+  `examples/dirfs`'s path confinement didn't defend against a symlink
+  planted at an intermediate path component — the same live bug class
+  this project's own working-tree writes were already fixed for. A
+  third gap, discovered next — base 9P2000 has no symlink
+  representation at all — landed as optional 9P2000.u support.
+- `objstore/patches` and `repo.Repo`'s ref/HEAD/lock storage now go
+  through a small internal `fsx.FS` seam instead of calling `os`/
+  `filepath` directly (no behavior change locally); working-tree
+  materialization (`checkout`, `status`, `diff`, `record`) similarly
+  moved onto a separate `fsx.Tree` seam.
+
 ## [0.1.6] - 2026-09-03
 
 ### Fixed
