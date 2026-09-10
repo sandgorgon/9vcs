@@ -51,9 +51,26 @@ promise between pre-`1.0.0` releases.
   conflict — with no concurrent patch involved at all. `status` then
   reported the file as permanently modified after every future record,
   and `diff` rendered an empty `--- / +++` header with nothing under
-  it. See PLAN.md's Status section for the full root-cause writeup and
-  the recovery path for a file already affected by this in existing
-  history.
+  it. Root cause: `OpDelete` only ever reconnects around its own
+  immediate neighbor, so a same-patch run of two or more consecutive
+  line deletes left one surviving one-hop "shortcut" edge alive from
+  the gap's start; a following insert into that same gap only retracted
+  the direct edge it was told about, never a shortcut reached by
+  chaining through dead nodes. A second, related bug in the diff
+  engine's LCS reconstruction — matching a common line back to *some*
+  old line with equal content, not the exact index the alignment chose
+  — could fabricate the same kind of fork whenever a file had a
+  duplicate line, even without a multi-line delete run. Fixed in
+  `objstore/patches/diff.go`: the LCS step now returns the exact
+  `(oldIdx, newIdx)` pairs the alignment chose, and `Diff` collapses a
+  same-patch multi-line delete run to a single direct edge before any
+  insert lands on that gap. A repo already affected by this does not
+  self-heal via a plain re-record (the healing ops target the fork's
+  resolved successor, not the actual dangling shortcut) — recover by
+  deleting the affected path and recording that, then re-adding it and
+  recording again; `Materialize` wipes a path's entire graph object on
+  a delete, so the re-add starts a clean line history with content
+  preserved on disk throughout.
 
 ## [0.1.5] - 2026-09-01
 
@@ -65,7 +82,9 @@ promise between pre-`1.0.0` releases.
   anything is dirty). A path with no recorded state — an uncommitted
   addition, or one half of an uncommitted rename — is removed rather
   than erroring, so reverting a rename is just naming both paths:
-  `9vcs restore old.txt new.txt`.
+  `9vcs restore old.txt new.txt`. Reuses the existing
+  materialize/write-working-tree machinery directly — no new
+  object-model concept and no staging index added.
 
 ### Changed
 
@@ -84,7 +103,12 @@ promise between pre-`1.0.0` releases.
   it hadn't been touched — keyed by 9vcs's existing per-line identity
   rather than a fragile byte-offset hunk, so a selection stays
   well-defined even as other pending edits in the same file are
-  selected or left for later.
+  selected or left for later. The core primitive, `repo.SelectOps`,
+  re-anchors a selected insert's `Prev` pointer through a
+  resolve-through-unselected map when consecutive new lines chain
+  through each other's freshly-minted IDs, so a non-contiguous
+  selection (e.g. keep the 1st and 3rd of three new consecutive lines)
+  still produces a valid, independently-replayable op list.
 
 ### Changed
 
@@ -168,19 +192,34 @@ First tagged release.
   `checkout`, `merge`, `status` — real patch-graph conflict detection
   (line-level forks, binary/symlink conflicts, modify/delete races),
   not a three-way text diff.
-- `apply`: N-way merge of multiple patches/branches in a single step.
+- `apply`: a true N-way merge patch across multiple patches/branches in
+  a single step, not chained pairwise merges. The underlying graph
+  fork/resolve machinery was already N-way; only the CLI-facing
+  `MERGE_HEAD`/`computeMerge` layer above it needed generalizing from a
+  hardcoded two sides to an arbitrary list.
 - Networking: `9vcs serve` (a 9P2000 server over TLS 1.3 with pinned-
   fingerprint peer authentication), `import` (one-way pull), and
   `reconcile` (bidirectional pull/push), each gated by per-peer
   `read`/`propose`/`write` permissions.
 - Offline change exchange: `bundle export`/`import`/`show` (signed,
-  single-file patch bundles) and `offer`/`offer list`/`offer apply`
-  (submit a change without write access, via a peer's `/offers`
-  mailbox).
+  single-file `.9vp` bundles — magic + version byte + signer public key
+  + signature + payload, signed over the payload bytes exactly as read
+  off the wire, no re-encode round-trip needed to verify) and
+  `offer`/`offer list`/`offer apply`/`offer remove` (submit a change
+  without write access, via a peer's `/offers` mailbox on a running
+  `serve`, gated by a new `propose` permission tier narrower than
+  `write` — can post and list offers, can't move `/refs`). Both
+  `bundle import` and `offer apply` only decode, verify, and store —
+  neither touches a ref or auto-integrates anything; that's always a
+  separate, explicit `apply`/`merge`/`diff` step.
 - Per-patch authorship: optional Ed25519 signing
   (`AuthorFingerprint`/`AuthorSignature`), verified independently of
   transport-level trust — a relay can't forge authorship of a patch it
   merely passes along.
+- `9vcs config [-global] user.name|user.email`: configures the identity
+  `record` signs patches under (formatted `"Name <email>"`), cascading
+  repo-local (`.9vcs/config`) → global (`~/.config/9vcs/config`) → OS
+  username, the same precedence model as `git config`.
 - `.9vcsignore` support, executable-bit and symlink tracking.
 - Client-side known-peers store with trust-on-first-use semantics for
   `import`/`reconcile`.
@@ -188,12 +227,189 @@ First tagged release.
 ### Security
 
 A round of audits ahead of this release found and fixed several real
-issues: path traversal (via patch file paths, ref names, and
-symlinks), a couple of unbounded-allocation/CPU-exhaustion vectors
-reachable over the network, a local ref-write race, and a
-merge-conflict-detection gap that could silently drop one side's
-content instead of reporting a conflict. See [PLAN.md](PLAN.md) for
-the full writeup of each.
+issues:
+
+**Path traversal**
+
+- `FileChange.Path` traversal — a patch's `Path` field reached
+  `filepath.Join(r.root, ...)` unchecked on write-out. A local `record`
+  can never produce a `../`-laden path (paths only ever come from a
+  real directory walk), but a patch received via `import`/`reconcile`,
+  a served push, or a bundle controls this field freely — a crafted,
+  legitimately-signed patch could write a file anywhere the process
+  could reach, entirely outside the repo. Fixed with `validPath`
+  (`objstore/patches/patch.go`), checked at `Decode` (every patch
+  received from outside the process) and again at `Store.Put` (a
+  backstop regardless of construction path) — rejecting an empty path,
+  a leading `/`, and a leading `..` segment specifically (`path.Clean`
+  alone does not reject `"../outside.txt"`, since it's already
+  canonical).
+- Ref-name path traversal, network-reachable — branch/ref names were
+  never validated at all: `vcsfs` passes a `Twalk`/`Tcreate` name
+  straight through to the ref reader/writer, and a single 9P `Wname`
+  element can itself contain embedded `/`/`..` with no library-level
+  rejection. A peer holding only `PermWrite` (no local filesystem
+  access) could get an arbitrary-path write of a hex hash string
+  outside `.9vcs/refs`. Fixed with `ValidRefName`
+  (`repo/repo.go`, `cmd/9vcs/repo.go` at the time), wired into the
+  single choke point every local and remote ref read/write already
+  goes through.
+- Symlink path traversal via an intermediate path component — the
+  `FileChange.Path` fix above only rejects a literal `..` *segment* in
+  the path string; it says nothing about a path like
+  `evil/nested/file.txt` where `evil` is itself a tracked symlink
+  pointing outside the repo. Working-tree writes used a plain
+  `filepath.Join` + `os.WriteFile`/`MkdirAll`, which — like any POSIX
+  path resolution — follows a symlink at *any* intermediate component,
+  not just the final one. Fixed by routing every working-tree write
+  through `os.Root` opened at the repo root: it follows a symlink that
+  resolves within the root but refuses one that would leave it, while
+  still allowing an absolute-target symlink to be *created* as a leaf
+  (so a legitimate `bin/env -> /usr/bin/env` still works).
+- Binary-conflict sidecar writes bypassed the fix above — three sibling
+  call sites (the `merge`/`apply` binary-conflict comparison sidecar,
+  and `merge -abort`/`record`'s cleanup of it) still used a plain
+  `filepath.Join` plus raw `os.*` calls instead of `os.Root`. This one
+  needs no crafted patch at all: an ordinary symlinked cache/vendor
+  directory already sitting in the working tree, plus a mundane
+  two-sided binary conflict underneath it, was enough to write or
+  delete outside the repo. Fixed by routing all four call sites through
+  the same `os.Root`-confined helpers.
+
+**Resource exhaustion / DoS**
+
+- Unbounded write-offset allocation, plus an integer-overflow variant —
+  the file types backing `/patches`, `/blobs`, `/offers`, and `/refs`
+  grew their write buffer to a client-claimed `offset + len(payload)`
+  with no upper bound: a 2-byte write claiming a 400MB offset grew
+  server heap by ~400MB, reachable at the weakest trust tier
+  (`PermPropose`, via `/offers`). A large enough offset also wrapped
+  around to a negative `int64`, which Go's slicing panics on
+  unconditionally — and since every 9P request runs in its own
+  unrecovered goroutine, one such write could crash the entire `9vcs
+  serve` process, not just the offending connection. Fixed with
+  `checkWriteSize`: rejects a negative offset outright, rejects the
+  claimed `offset` alone above a 1 GiB cap *before* adding the payload
+  length to it (closing the overflow window), and only then rejects the
+  sum.
+- Unbounded per-connection memory from concurrently-open write-fids —
+  even with a single fid's buffer capped, nothing bounded how many
+  write-fids one connection could hold open (and buffering)
+  concurrently: create many fids, write close to the cap into each,
+  never clunk. Fixed with a connection-wide write-buffer byte budget,
+  reserved against before any buffer grows and released on close,
+  scoped per-connection so a client that vanishes without clunking
+  can't leak accounting server-wide.
+- The topological sort underlying `Materialize`/`History`/`Closure`
+  re-sorted its entire ready-queue from scratch on every pop instead of
+  using a real priority queue — O(n² log n) total. Invisible for a
+  normal repo (one root patch), but nothing stops a peer from feeding
+  in many mutually-independent patches via `import`/`reconcile`/a
+  served push, and once thousands are in play a `log`/`merge`/`checkout`
+  pays a real CPU cost. Fixed with a `container/heap`-backed min-heap
+  preserving the same deterministic tie-break, O(n log n) total.
+- A length-prefixed element count (e.g. an op count) was validated only
+  against total bytes remaining in the input, not against how many
+  bytes one *element* actually needs — so a claim near the raw byte
+  count could demand an allocation up to ~72x larger than the input
+  could legitimately back. Go's response to a failed huge allocation is
+  a *fatal*, unrecoverable runtime error, not a normal panic — one
+  crafted ~1 GiB patch or bundle object could crash the whole server
+  via a ~72 GB allocation attempt. Fixed by giving the count-reading
+  helper a minimum-element-size parameter per count type, in both
+  `objstore/patches` and `bundle` (which had an independent copy of the
+  same gap).
+- `HashFromHex` accepted the wrong decoded length — valid-but-wrong-
+  length hex silently zero-padded (in the worst case, coercing to the
+  zero-hash "no such ref" sentinel) or silently truncated, with no
+  error either way. No concrete exploit found, but hardened
+  defensively, the same "reject rather than silently coerce" shape as
+  the path-traversal fixes above.
+
+**Concurrency & atomicity**
+
+- Ref/HEAD writes were neither atomic nor compare-and-swapped: a plain
+  `os.WriteFile` straight to the final path (a crash mid-write could
+  leave a torn ref), guarded only by an in-memory mutex that does
+  nothing across processes. Two local invocations, or a local command
+  racing a live `serve`'s incoming push, could silently drop one side's
+  update with no conflict ever raised. Fixed with a cross-process
+  advisory lock (`withRefLock`, via `os.O_EXCL`, stealing a lock older
+  than 10s as abandoned) plus compare-and-swap on every local mutating
+  call site, both run inside the lock so check-then-write is atomic.
+- `MERGE_HEAD`/`MERGE_SIDECARS` writes had the same gap, local-only: no
+  atomic rename and no lock, so a crash mid-write could leave a
+  truncated `MERGE_HEAD`, and two concurrent local merge/apply
+  invocations could interleave writes after both independently passed
+  the "no merge in progress" check. Fixed by routing all four writers
+  through the same ref lock and atomic temp-file-then-rename.
+- Two goroutines writing *identical* content concurrently (a real
+  scenario: two peer connections relaying the same patch to one `serve`
+  process at once) shared a temp filename derived only from the
+  content hash, so one writer's already-created temp file caused the
+  other's create to fail with a spurious "permission denied." Fixed
+  with a unique-per-call temp name, plus a fallback: if the rename
+  still fails, a concurrent writer having already placed the
+  (identical, content-addressed) content there counts as success, not
+  failure.
+
+**Merge / conflict-detection correctness**
+
+- N-way `apply`/`merge` silently dropped a binary/symlink conflict when
+  "ours" never had the path — the conflict-detection loop anchored
+  solely on the first root ("ours"), so a path only two *other* roots
+  both introduced with different content was never even visited, and
+  the plain union silently picked a side with no conflict reported.
+  Directly reachable via `apply`'s whole reason to exist
+  (non-"ours"-anchored N-way merges). Fixed by checking every root that
+  has the path, not just the first one.
+- The fix above still missed a cross-*kind* mismatch — it compared
+  same-kind values (blob vs. blob) but a root introducing the same path
+  under a completely different kind (e.g. text vs. binary) matched
+  neither case and was silently dropped the same way. Fixed by checking
+  for a kind mismatch first, reported as its own `"type"` conflict kind
+  rather than being conflated with (or crashing) the binary-conflict
+  sidecar path, which assumes a real blob to compare.
+- Modify/delete resolution had an order-dependent fork bug — not
+  security, a correctness bug: finalizing an ordinary modify/delete
+  merge conflict (one side edits, the other deletes, resolution keeps
+  the edit) intermittently left the working tree looking dirty
+  immediately after `record`, because materializing wipes a path's
+  *entire* graph object on any delete, and whether the modifying side's
+  own node survived that wipe depended on the same hash-based
+  topological tie-break that created the conflict in the first place —
+  occasionally producing two live nodes with identical content, a
+  genuine fork. Fixed by explicitly emitting a delete for every node
+  the modifying side's own already-correct resolution reports alive,
+  before the fresh insert that records the kept content, regardless of
+  wipe-vs-insert ordering.
+- The O(n·m) diff cost underlying rename detection was called once per
+  deleted×added path pair; a changeset touching several large files
+  (plausible after a peer import) turned an ordinary `status`/`diff`
+  into a multiplicative pile of expensive diffs never directly asked
+  for. A cell-count bound plus a hash-based fast path for exact-content
+  renames closed the acute cost, but the underlying shape (still
+  O(deleted × added) candidate pairs, each paying an O(file size) hash)
+  remained — not worth the ongoing cost/complexity for a purely
+  cosmetic, display-time feature. See Removed below.
+- A signing-order bug in `apply`'s merge patches, found live rather
+  than by a unit test: patches were signed *before* the store's
+  internal field-reordering (`Normalize`) ran, so the signed bytes and
+  the later-verified bytes diverged whenever a patch had more than one
+  dependency to reorder. Invisible for an ordinary two-way merge, but
+  any `apply`-produced merge patch has several dependencies —
+  surfacing as `9vcs log` printing `(INVALID SIGNATURE)` on an
+  otherwise-correct, cleanly-applied merge. Fixed by having the signing
+  step normalize the patch itself first (idempotent, so the store's
+  later normalization is a no-op).
+
+### Removed
+
+- Rename detection was built, then removed the same day, pre-release —
+  its remaining O(deleted × added) candidate-pair cost (see Security
+  above) wasn't worth carrying for a purely cosmetic, display-time
+  feature. A moved file now records as a plain delete+add pair, exactly
+  as it's stored regardless of whether a rename is inferred.
 
 ### Known limitations
 
