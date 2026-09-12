@@ -7,6 +7,16 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.8] - 2026-09-11
+
+### Changed
+
+- Bumped `github.com/sandgorgon/9p` to v0.9.1 — a docs/test-flake-only
+  upstream release (README/doc comments corrected to document 9P2000.u
+  support instead of denying it; a flaky `TestMaxConcurrentRequestsLimitsConcurrency`
+  deadlock fixed, test-only, no server behavior changed). No 9vcs code
+  changes needed.
+
 ## [0.1.7] - 2026-09-09
 
 ### Added
