@@ -12,7 +12,8 @@ import (
 
 func cmdRecord(args []string) error {
 	fs := flag.NewFlagSet("record", flag.ExitOnError)
-	message := fs.String("m", "", "patch message")
+	var messageSel messageFlag
+	fs.Var(&messageSel, "m", "patch message; repeat for additional paragraphs (like git), or pass a multi-line value")
 	interactive := fs.Bool("p", false, "interactively select which pending changes to record")
 	var linesSel pathIDsFlag
 	fs.Var(&linesSel, "lines", "select specific line ids to record: PATH:ID[,ID...] (repeatable)")
@@ -21,7 +22,8 @@ func cmdRecord(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *message == "" {
+	message := messageSel.Message()
+	if message == "" {
 		return fmt.Errorf("record: -m MESSAGE is required")
 	}
 	explicitSelection := len(linesSel.m) > 0 || len(filesSel.m) > 0
@@ -181,7 +183,7 @@ func cmdRecord(args []string) error {
 	if err != nil {
 		return fmt.Errorf("record: %w", err)
 	}
-	patch := &patches.Patch{Dependencies: deps, Author: authorStr, Time: time.Now(), Message: *message}
+	patch := &patches.Patch{Dependencies: deps, Author: authorStr, Time: time.Now(), Message: message}
 	for _, fc := range changes {
 		patch.Changes = append(patch.Changes, fc)
 	}
@@ -203,7 +205,7 @@ func cmdRecord(args []string) error {
 		}
 	}
 
-	fmt.Printf("recorded %s: %s\n", hash.String()[:12], *message)
+	fmt.Printf("recorded %s: %s\n", hash.String()[:12], messageSubject(message))
 	return nil
 }
 

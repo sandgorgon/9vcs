@@ -39,7 +39,8 @@ func cmdOffer(args []string) error {
 
 func cmdOfferPost(args []string) error {
 	fs := flag.NewFlagSet("offer", flag.ExitOnError)
-	message := fs.String("m", "", "offer message")
+	var messageSel messageFlag
+	fs.Var(&messageSel, "m", "offer message; repeat for additional paragraphs")
 	fingerprint := fs.String("peer-fingerprint", "", "expected fingerprint of the peer, as an explicit one-off pin; omit to use the known-peers store, prompting on first connection")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -67,7 +68,7 @@ func cmdOfferPost(args []string) error {
 	if err != nil {
 		return fmt.Errorf("offer: loading identity: %w", err)
 	}
-	data, n, err := bundle.Export(r.Store, r.Blobs, roots, *message, id.Key)
+	data, n, err := bundle.Export(r.Store, r.Blobs, roots, messageSel.Message(), id.Key)
 	if err != nil {
 		return fmt.Errorf("offer: %w", err)
 	}

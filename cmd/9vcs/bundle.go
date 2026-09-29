@@ -29,7 +29,8 @@ func cmdBundle(args []string) error {
 func cmdBundleExport(args []string) error {
 	fs := flag.NewFlagSet("bundle export", flag.ExitOnError)
 	out := fs.String("o", "", "output bundle file (required)")
-	message := fs.String("m", "", "bundle message")
+	var messageSel messageFlag
+	fs.Var(&messageSel, "m", "bundle message; repeat for additional paragraphs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -59,7 +60,7 @@ func cmdBundleExport(args []string) error {
 		return fmt.Errorf("bundle export: loading identity: %w", err)
 	}
 
-	data, n, err := bundle.Export(r.Store, r.Blobs, roots, *message, id.Key)
+	data, n, err := bundle.Export(r.Store, r.Blobs, roots, messageSel.Message(), id.Key)
 	if err != nil {
 		return fmt.Errorf("bundle export: %w", err)
 	}

@@ -7,6 +7,21 @@ README's [Versioning and compatibility](README.md#versioning-and-compatibility)
 section — the on-disk patch/bundle format makes no compatibility
 promise between pre-`1.0.0` releases.
 
+## [0.1.9] - 2026-09-29
+
+### Added
+
+- `-m` is now repeatable on `record`, `bundle export`, and `offer`, like
+  Git: each occurrence becomes its own paragraph, joined by a blank
+  line. A single `-m` whose value contains newlines is kept as given.
+  Messages are normalized (CRLF to LF, trailing whitespace stripped per
+  line, leading/trailing blank lines dropped).
+
+### Changed
+
+- `9vcs log` indents every line of a multi-line message, not just the
+  first, and `record`'s confirmation line shows only the subject.
+
 ## [0.1.8] - 2026-09-11
 
 ### Changed
