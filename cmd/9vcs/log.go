@@ -69,7 +69,7 @@ func cmdLog(args []string) error {
 			fmt.Printf("Fingerprint: %s (%s)\n", auth.Fingerprint(ed25519.PublicKey(p.AuthorFingerprint[:])), status)
 		}
 		fmt.Printf("Date:   %s\n", p.Time.Local().Format("Mon Jan 2 15:04:05 2006 -0700"))
-		fmt.Printf("\n    %s\n\n", p.Message)
+		fmt.Printf("\n%s\n\n", indentMessage(p.Message))
 		for _, fc := range p.Changes {
 			switch fc.Kind {
 			case patches.KindDelete:
